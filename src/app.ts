@@ -635,27 +635,35 @@ interface StockData {
 app.get('/api/heatmap', async (req, res) => {
   try {
     const collection = db.collection('nse_fno');
+    console.log('Connected to collection:', collection.collectionName);
+
     const securityIds = securities.map(s => s.security_id);
+    console.log(`Looking for ${securityIds.length} securities:`, securityIds.slice(0, 5), '...'); // Show first 5 IDs
 
     // Query as any[]
     let items: any[] = await collection.find({ security_id: { $in: securityIds } })
       .sort({ _id: -1 })
       
       .toArray();
+    console.log(`First query found ${items.length} items with numeric security_ids`);
 
     // If none found, try string IDs
     if (!items || items.length === 0) {
+      console.log('Trying with string security_ids...');
       items = await collection.find({ security_id: { $in: securityIds.map(id => id.toString()) } })
         .sort({ _id: -1 })
         
         .toArray();
+        console.log(`Second query found ${items.length} items with string security_ids`);
     }
 
     // Fallback: get latest 50 (unfiltered)
     let fallbackItems: any[] = [];
     if (!items || items.length === 0) {
+      console.log('No items found with security_ids, falling back to latest 50');
       try {
         fallbackItems = await collection.find({}).sort({ _id: -1 }).limit(50).toArray();
+        console.log(`Fallback query found ${fallbackItems.length} items`);
       } catch (fallbackError: unknown) {
         let msg = 'Unknown fallback error';
         if (fallbackError instanceof Error) {
@@ -670,6 +678,7 @@ app.get('/api/heatmap', async (req, res) => {
       (Array.isArray(items) && items.length > 0)
         ? items
         : (Array.isArray(fallbackItems) ? fallbackItems : []);
+         console.log(`Total items to process: ${resultItems.length}`);
 
     // Attach trading_symbol and sector from securities list
     const processedItems: StockData[] = resultItems.map((item) => {
@@ -682,7 +691,8 @@ app.get('/api/heatmap', async (req, res) => {
       };
     });
 
-    console.log(`\nSent ${processedItems.length} heatmap records`);
+    console.log('\nFinal processed items count:', processedItems.length);
+    console.log('Sample of first 5 processed items:');
     console.log(JSON.stringify(processedItems.slice(0, 5), null, 2)); // Print first 5 for debug
 
     res.json(processedItems);

@@ -48,23 +48,21 @@ const connectDB = async () => {
 connectDB();
 
 
-
 // Routes
 app.use('/api', routes);
 
 // ✅ API: Fetch selected stocks with LTP and volume
-// ✅ API: Fetch selected stocks with LTP and volume
 app.get('/api/stocks', async (_req, res) => {
   try {
     const securityIds = [
-      3499, 4306, 10604, 1363, 13538, 11723, 5097, 25, 2475, 1594, 2031,
-      16669, 1964, 11483, 1232, 7229, 2885, 16675, 11536, 10999, 18143, 3432,
-      3506, 467, 910, 3787, 15083, 21808, 1660, 3045, 157, 881, 4963, 383, 317,
-      11532, 11630, 3351, 14977, 1922, 5258, 5900, 17963, 1394, 1333, 1348, 694,
-      236, 3456
-    ];
+      53454, 53435, 53260, 53321, 53461, 53359, 53302, 53224, 53405, 53343,
+      53379, 53251, 53469, 53375, 53311, 53314, 53429, 53252, 53460, 53383,
+      53354, 53450, 53466, 53317, 53301, 53480, 53226, 53432, 53352, 53433,
+      53241, 53300, 53327, 53258, 53253, 53471, 53398, 53441, 53425, 53369,
+      53341, 53250, 53395, 53324, 53316, 53318, 53279, 53245, 53280, 53452
+    ]
 
-    const stocks = await db.collection('nse_equity')
+    const stocks = await db.collection('nse_fno_stock')
       .find({ security_id: { $in: securityIds } })
       .project({
         _id: 0,
@@ -85,61 +83,81 @@ app.get('/api/stocks', async (_req, res) => {
 
 app.get('/api/advdec', async (req: Request, res: Response): Promise<void> => {
   try {
-    if (!db) throw new Error('Database not connected');
     const now = new Date();
     const marketOpen = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 15, 0, 0);
-    const marketClose = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 16, 30, 59, 999);
+    const marketClose = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 15, 30, 59, 999);
 
-    // Helper: last completed slot time as string "HH:mm"
-    function getLastCompletedSlot(dt: Date) {
-      let h = dt.getHours(), m = dt.getMinutes();
-      let slotM = m - (m % 5);
-      if (h < 9 || (h === 9 && slotM < 15)) return "09:15";
-      if (h > 15 || (h === 15 && slotM > 30)) return "15:30";
-      return `${h.toString().padStart(2, '0')}:${slotM.toString().padStart(2, '0')}`;
-    }
+    const pipeline = [
+      {
+        $match: {
+          received_at: { $gte: marketOpen, $lte: marketClose },
+          type: "Full Data"
+        }
+      },
+      {
+        $addFields: {
+          slot: {
+            $dateTrunc: {
+              date: "$received_at",
+              unit: "minute",
+              binSize: 5,
+              timezone: "Asia/Kolkata"
+            }
+          }
+        }
+      },
+      {
+        $sort: { received_at: -1 }
+      },
+      {
+        $group: {
+          _id: { slot: "$slot", security_id: "$security_id" },
+          latest: { $first: "$$ROOT" }
+        }
+      },
+      {
+        $group: {
+          _id: "$_id.slot",
+          stocks: { $push: "$latest" }
+        }
+      },
+      {
+        $sort: { _id: 1 }
+      }
+    ];
 
-    // Helper: only valid market slot "HH:mm"
-    function isMarketSlot(h: number, m: number) {
-      if (h < 9 || (h === 9 && m < 15)) return false;
-      if (h > 15 || (h === 15 && m > 30)) return false;
-      return m % 5 === 0;
-    }
+    const result = await db.collection('nse_fno_stock').aggregate(pipeline).toArray();
 
-    // Fetch all of today's records (between open and close)
-    const records = await db.collection('nse_equity')
-      .find({ timestamp: { $gte: marketOpen, $lte: marketClose } })
-      .sort({ timestamp: 1 })
-      .toArray();
+    const chartData = result
+      .filter(slotData => {
+        const slotTime = new Date(slotData._id);
+        return slotTime <= now;
+      })
+      .map(slotData => {
+        const time = new Date(slotData._id).toLocaleTimeString("en-IN", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+          timeZone: "Asia/Kolkata"
+        });
 
-    // Group records by exact 5-min slot time: "HH:mm"
-    const grouped: Record<string, any[]> = {};
-    for (const doc of records) {
-      const dt = new Date(doc.timestamp);
-      const h = dt.getHours(), m = dt.getMinutes();
-      // Only include records at exact 5-min marks (09:15, 09:20, ...)
-      if (!isMarketSlot(h, m)) continue;
-      const slot = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
-      if (!grouped[slot]) grouped[slot] = [];
-      grouped[slot].push(doc);
-    }
+        const stocks = slotData.stocks.slice(0, 220);
 
-    // Get the last completed slot (do NOT include in-progress slot!)
-    const lastSlot = getLastCompletedSlot(now);
+        let advances = 0;
+        let declines = 0;
 
-    // Build chartData array up to the last completed slot (inclusive)
-    const chartData = Object.entries(grouped)
-      .filter(([time]) => time <= lastSlot)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([time, group]) => {
-        let advances = 0, declines = 0;
-        for (const stock of group) {
+        for (const stock of stocks) {
           const ltp = parseFloat(stock.LTP);
           const close = parseFloat(stock.close);
           if (ltp > close) advances++;
           else if (ltp < close) declines++;
         }
-        return { time, advances, declines };
+
+        return {
+          time,
+          advances,
+          declines
+        };
       });
 
     const latest = chartData.at(-1);
@@ -154,10 +172,12 @@ app.get('/api/advdec', async (req: Request, res: Response): Promise<void> => {
     console.error('Error in /api/advdec:', err);
     res.status(500).json({
       error: 'Internal Server Error',
-      message: err instanceof Error ? err.message : 'Unknown error'
+      message: err instanceof Error ? err.message : 'Unknown error',
+      details: err
     });
   }
 });
+
 
 
 app.get('/api/nifty/atm-strikes-timeline', async (req: Request, res: Response): Promise<void> => {
@@ -165,11 +185,16 @@ app.get('/api/nifty/atm-strikes-timeline', async (req: Request, res: Response): 
     const intervalParam = req.query.interval as string || '3';
     const interval = parseInt(intervalParam, 10); // in minutes
 
-    const niftyCollection = db.collection('nse_fno_index');
-    const optionChainCollection = db.collection('nse_fno_index');
+    const niftyCollection = db.collection('all_nse_fno');
+    const optionChainCollection = db.collection('all_nse_fno');
 
     const docs = await niftyCollection
-      .find({ security_id: 56785 }, { projection: { _id: 0, LTP: 1, timestamp: 1 } })
+      .find({
+        security_id: 56785, timestamp: {
+          $gte: new Date(new Date().setUTCHours(0, 0, 0, 0)),
+          $lt: new Date(new Date().setUTCHours(24, 0, 0, 0))
+        }
+      }, { projection: { _id: 0, LTP: 1, timestamp: 1 } })
       .sort({ timestamp: -1 })
       .toArray();
 
@@ -203,9 +228,13 @@ app.get('/api/nifty/atm-strikes-timeline', async (req: Request, res: Response): 
           strike_price: atmStrike,
           trading_symbol: { $regex: '^NIFTY-Jun2025' },
           option_type: "CE",
+          // timestamp: {
+          //   $gte: new Date(rounded.getTime()),
+          //   $lt: new Date(rounded.getTime() + interval * 60 * 1000)
+          // }
           timestamp: {
-            $gte: new Date(rounded.getTime()),
-            $lt: new Date(rounded.getTime() + interval * 60 * 1000)
+            $gte: new Date(new Date().setUTCHours(0, 0, 0, 0)),
+            $lt: new Date(new Date().setUTCHours(24, 0, 0, 0))
           }
         });
 
@@ -213,9 +242,13 @@ app.get('/api/nifty/atm-strikes-timeline', async (req: Request, res: Response): 
           strike_price: atmStrike,
           trading_symbol: { $regex: '^NIFTY-Jun2025' },
           option_type: "PE",
+          // timestamp: {
+          //   $gte: new Date(rounded.getTime()),
+          //   $lt: new Date(rounded.getTime() + interval * 60 * 1000)
+          // }
           timestamp: {
-            $gte: new Date(rounded.getTime()),
-            $lt: new Date(rounded.getTime() + interval * 60 * 1000)
+            $gte: new Date(new Date().setUTCHours(0, 0, 0, 0)),
+            $lt: new Date(new Date().setUTCHours(24, 0, 0, 0))
           }
         });
 
@@ -240,8 +273,13 @@ app.get('/api/nifty/atm-strikes-timeline', async (req: Request, res: Response): 
 
 app.get('/api/nifty/near5', async (req: Request, res: Response): Promise<void> => {
   try {
-    const collection = db.collection('nse_fno_index');
-    const latestNifty = await collection.find({ security_id: 56785 })
+    const collection = db.collection('all_nse_fno');
+    const latestNifty = await collection.find({
+      security_id: 56785, timestamp: {
+        $gte: new Date(new Date().setUTCHours(0, 0, 0, 0)),
+        $lt: new Date(new Date().setUTCHours(24, 0, 0, 0))
+      }
+    })
       .sort({ timestamp: -1 })
       .limit(1)
       .toArray();
@@ -255,20 +293,28 @@ app.get('/api/nifty/near5', async (req: Request, res: Response): Promise<void> =
     const atmStrike = Math.round(niftyLTP / 50) * 50;
     const strikePrices = Array.from({ length: 5 }, (_, i) => atmStrike - 100 + i * 50);
 
-    const collection2 = db.collection('nse_fno_index');
+    const collection2 = db.collection('all_nse_fno');
 
     const results = await Promise.all(
       strikePrices.map(async (strike) => {
         const CE_docs = await collection2.find({
           strike_price: strike,
           option_type: "CE",
-          trading_symbol: { $regex: '^NIFTY-Jun2025' }
+          trading_symbol: { $regex: '^NIFTY-Jun2025' },
+          timestamp: {
+            $gte: new Date(new Date().setUTCHours(0, 0, 0, 0)),
+            $lt: new Date(new Date().setUTCHours(24, 0, 0, 0))
+          }
         }).toArray();
 
         const PE_docs = await collection2.find({
           strike_price: strike,
           option_type: "PE",
-          trading_symbol: { $regex: '^NIFTY-Jun2025' }
+          trading_symbol: { $regex: '^NIFTY-Jun2025' },
+          timestamp: {
+            $gte: new Date(new Date().setUTCHours(0, 0, 0, 0)),
+            $lt: new Date(new Date().setUTCHours(24, 0, 0, 0))
+          }
         }).toArray();
 
         // Group CE and PE by timestamp
@@ -297,9 +343,15 @@ app.get('/api/nifty/near5', async (req: Request, res: Response): Promise<void> =
     const flattened = results.flat();
 
     // Fetch Nifty data
-    const niftyCollection = db.collection('nse_fno_index');
+    const niftyCollection = db.collection('all_nse_fno');
     const niftyDocs = await niftyCollection
-      .find({ security_id: 56785 }, { projection: { _id: 0, LTP: 1, timestamp: 1 } })
+      .find({
+        security_id: 56785,
+        timestamp: {
+          $gte: new Date(new Date().setUTCHours(0, 0, 0, 0)),
+          $lt: new Date(new Date().setUTCHours(24, 0, 0, 0))
+        }
+      }, { projection: { _id: 0, LTP: 1, timestamp: 1 } })
       .sort({ timestamp: 1 })
       .toArray();
 
@@ -308,7 +360,7 @@ app.get('/api/nifty/near5', async (req: Request, res: Response): Promise<void> =
       timestamp: doc.timestamp,
     }));
 
-    res.json({ atmStrike, overall: flattened,nifty });
+    res.json({ atmStrike, overall: flattened, nifty });
   } catch (error) {
     console.error('Error fetching NEAR5:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -317,8 +369,14 @@ app.get('/api/nifty/near5', async (req: Request, res: Response): Promise<void> =
 // ---------------------------------------------------------------------------------------------
 app.get('/api/nifty/overall', async (req: Request, res: Response): Promise<void> => {
   try {
-    const collection = db.collection('nse_fno_index');
-    const latestNifty = await collection.find({ security_id: 56785 })
+    const collection = db.collection('all_nse_fno');
+    const latestNifty = await collection.find({
+      security_id: 56785,
+      timestamp: {
+        $gte: new Date(new Date().setUTCHours(0, 0, 0, 0)),
+        $lt: new Date(new Date().setUTCHours(24, 0, 0, 0))
+      }
+    })
       .sort({ timestamp: -1 })
       .limit(1)
       .toArray();
@@ -332,20 +390,28 @@ app.get('/api/nifty/overall', async (req: Request, res: Response): Promise<void>
     const atmStrike = Math.round(niftyLTP / 50) * 50;
     const strikePrices = Array.from({ length: 21 }, (_, i) => atmStrike - 500 + i * 50);
 
-    const collection2 = db.collection('nse_fno_index');
+    const collection2 = db.collection('all_nse_fno');
 
     const results = await Promise.all(
       strikePrices.map(async (strike) => {
         const CE_docs = await collection2.find({
           strike_price: strike,
           option_type: "CE",
-          trading_symbol: { $regex: '^NIFTY-Jun2025' }
+          trading_symbol: { $regex: '^NIFTY-Jun2025' },
+          timestamp: {
+            $gte: new Date(new Date().setUTCHours(0, 0, 0, 0)),
+            $lt: new Date(new Date().setUTCHours(24, 0, 0, 0))
+          }
         }).toArray();
 
         const PE_docs = await collection2.find({
           strike_price: strike,
           option_type: "PE",
-          trading_symbol: { $regex: '^NIFTY-Jun2025' }
+          trading_symbol: { $regex: '^NIFTY-Jun2025' },
+          timestamp: {
+            $gte: new Date(new Date().setUTCHours(0, 0, 0, 0)),
+            $lt: new Date(new Date().setUTCHours(24, 0, 0, 0))
+          }
         }).toArray();
 
         // Group CE and PE by timestamp
@@ -374,9 +440,15 @@ app.get('/api/nifty/overall', async (req: Request, res: Response): Promise<void>
     const flattened = results.flat();
 
     // Fetch Nifty data
-    const niftyCollection = db.collection('nse_fno_index');
+    const niftyCollection = db.collection('all_nse_fno');
     const niftyDocs = await niftyCollection
-      .find({ security_id: 56785 }, { projection: { _id: 0, LTP: 1, timestamp: 1 } })
+      .find({
+        security_id: 56785,
+        timestamp: {
+          $gte: new Date(new Date().setUTCHours(0, 0, 0, 0)),
+          $lt: new Date(new Date().setUTCHours(24, 0, 0, 0))
+        }
+      }, { projection: { _id: 0, LTP: 1, timestamp: 1 } })
       .sort({ timestamp: 1 })
       .toArray();
 
@@ -385,7 +457,7 @@ app.get('/api/nifty/overall', async (req: Request, res: Response): Promise<void>
       timestamp: doc.timestamp,
     }));
 
-    res.json({ atmStrike, overall: flattened,nifty });
+    res.json({ atmStrike, overall: flattened, nifty });
   } catch (error) {
     console.error('Error fetching NEAR5:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -396,230 +468,230 @@ app.get('/api/nifty/overall', async (req: Request, res: Response): Promise<void>
 
 
 
-
 const securities = [
-  { name: "AARTIIND JUN FUT", security_id: 56787, sector: "Chemicals" },
-  { name: "ABB JUN FUT", security_id: 56788, sector: "Capital Goods" },
-  { name: "ABCAPITAL JUN FUT", security_id: 56789, sector: "Financial Services" },
-  { name: "ABFRL JUN FUT", security_id: 56794, sector: "Consumer Discretionary" },
-  { name: "ACC JUN FUT", security_id: 56795, sector: "Cement" },
-  { name: "ADANIENSOL JUN FUT", security_id: 56798, sector: "Utilities" },
-  { name: "ADANIENT JUN FUT", security_id: 56799, sector: "Conglomerate" },
-  { name: "ADANIGREEN JUN FUT", security_id: 56800, sector: "Utilities" },
-  { name: "ADANIPORTS JUN FUT", security_id: 56801, sector: "Logistics" },
-  { name: "ALKEM JUN FUT", security_id: 56806, sector: "Pharmaceuticals" },
-  { name: "AMBUJACEM JUN FUT", security_id: 56807, sector: "Cement" },
-  { name: "ANGELONE JUN FUT", security_id: 56808, sector: "Financial Services" },
-  { name: "APLAPOLLO JUN FUT", security_id: 56809, sector: "Metals" },
-  { name: "APOLLOHOSP JUN FUT", security_id: 56810, sector: "Healthcare" },
-  { name: "ASHOKLEY JUN FUT", security_id: 56811, sector: "Automotive" },
-  { name: "ASIANPAINT JUN FUT", security_id: 56816, sector: "Paints" },
-  { name: "ASTRAL JUN FUT", security_id: 56817, sector: "Industrials" },
-  { name: "ATGL JUN FUT", security_id: 56818, sector: "Utilities" },
-  { name: "AUBANK JUN FUT", security_id: 56819, sector: "Banking" },
-  { name: "AUROPHARMA JUN FUT", security_id: 56822, sector: "Pharmaceuticals" },
-  { name: "AXISBANK JUN FUT", security_id: 56823, sector: "Banking" },
-  { name: "BAJAJ-AUTO JUN FUT", security_id: 56826, sector: "Automotive" },
-  { name: "BAJAJFINSV JUN FUT", security_id: 56827, sector: "Financial Services" },
-  { name: "BAJFINANCE JUN FUT", security_id: 56828, sector: "Financial Services" },
-  { name: "BALKRISIND JUN FUT", security_id: 56829, sector: "Automotive" },
-  { name: "BANDHANBNK JUN FUT", security_id: 56830, sector: "Banking" },
-  { name: "BANKBARODA JUN FUT", security_id: 56831, sector: "Banking" },
-  { name: "BANKINDIA JUN FUT", security_id: 56832, sector: "Banking" },
-  { name: "BEL JUN FUT", security_id: 56833, sector: "Defence" },
-  { name: "BHARATFORG JUN FUT", security_id: 56834, sector: "Automotive" },
-  { name: "BHARTIARTL JUN FUT", security_id: 56835, sector: "Telecom" },
-  { name: "BHEL JUN FUT", security_id: 56838, sector: "Capital Goods" },
-  { name: "BIOCON JUN FUT", security_id: 56839, sector: "Pharmaceuticals" },
-  { name: "BOSCHLTD JUN FUT", security_id: 56844, sector: "Automotive" },
-  { name: "BPCL JUN FUT", security_id: 56845, sector: "Oil & Gas" },
-  { name: "BRITANNIA JUN FUT", security_id: 56846, sector: "FMCG" },
-  { name: "BSE JUN FUT", security_id: 56847, sector: "Financial Services" },
-  { name: "BSOFT JUN FUT", security_id: 56848, sector: "IT" },
-  { name: "CAMS JUN FUT", security_id: 56849, sector: "Financial Services" },
-  { name: "CANBK JUN FUT", security_id: 56850, sector: "Banking" },
-  { name: "CDSL JUN FUT", security_id: 56851, sector: "Financial Services" },
-  { name: "CESC JUN FUT", security_id: 56852, sector: "Utilities" },
-  { name: "CGPOWER JUN FUT", security_id: 56853, sector: "Capital Goods" },
-  { name: "CHAMBLFERT JUN FUT", security_id: 56856, sector: "Fertilizers" },
-  { name: "CHOLAFIN JUN FUT", security_id: 56857, sector: "Financial Services" },
-  { name: "CIPLA JUN FUT", security_id: 56858, sector: "Pharmaceuticals" },
-  { name: "COALINDIA JUN FUT", security_id: 56859, sector: "Metals" },
-  { name: "COFORGE JUN FUT", security_id: 56860, sector: "IT" },
-  { name: "COLPAL JUN FUT", security_id: 56861, sector: "FMCG" },
-  { name: "CONCOR JUN FUT", security_id: 56862, sector: "Logistics" },
-  { name: "CROMPTON JUN FUT", security_id: 56863, sector: "Consumer Durables" },
-  { name: "CUMMINSIND JUN FUT", security_id: 56864, sector: "Capital Goods" },
-  { name: "CYIENT JUN FUT", security_id: 56865, sector: "IT" },
-   { name: "DABUR JUN FUT", security_id: 56900, sector: "FMCG" },
-  { name: "DALBHARAT JUN FUT", security_id: 56901, sector: "Cement" },
-  { name: "DELHIVERY JUN FUT", security_id: 56904, sector: "Logistics" },
-  { name: "DIVISLAB JUN FUT", security_id: 56905, sector: "Pharmaceuticals" },
-  { name: "DIXON JUN FUT", security_id: 56906, sector: "Consumer Durables" },
-  { name: "DLF JUN FUT", security_id: 56907, sector: "Real Estate" },
-  { name: "DMART JUN FUT", security_id: 56908, sector: "Retail" },
-  { name: "DRREDDY JUN FUT", security_id: 56909, sector: "Pharmaceuticals" },
-  { name: "EICHERMOT JUN FUT", security_id: 56910, sector: "Automotive" },
-  { name: "EXIDEIND JUN FUT", security_id: 56911, sector: "Automotive" },
-  { name: "FEDERALBNK JUN FUT", security_id: 56918, sector: "Banking" },
-  { name: "GAIL JUN FUT", security_id: 56919, sector: "Oil & Gas" },
-  { name: "GLENMARK JUN FUT", security_id: 56926, sector: "Pharmaceuticals" },
-  { name: "GMRAIRPORT JUN FUT", security_id: 56927, sector: "Logistics" },
-  { name: "GODREJCP JUN FUT", security_id: 56928, sector: "FMCG" },
-  { name: "GODREJPROP JUN FUT", security_id: 56929, sector: "Real Estate" },
-  { name: "GRANULES JUN FUT", security_id: 56930, sector: "Pharmaceuticals" },
-  { name: "GRASIM JUN FUT", security_id: 56931, sector: "Cement" },
-  { name: "HAL JUN FUT", security_id: 56932, sector: "Defence" },
-  { name: "HAVELLS JUN FUT", security_id: 56933, sector: "Consumer Durables" },
-  { name: "HCLTECH JUN FUT", security_id: 56940, sector: "IT" },
-  { name: "HDFCAMC JUN FUT", security_id: 56941, sector: "Financial Services" },
-  { name: "HDFCBANK JUN FUT", security_id: 56946, sector: "Banking" },
-  { name: "HDFCLIFE JUN FUT", security_id: 56947, sector: "Insurance" },
-  { name: "HEROMOTOCO JUN FUT", security_id: 56952, sector: "Automotive" },
-  { name: "HFCL JUN FUT", security_id: 56953, sector: "Telecom" },
-  { name: "HINDALCO JUN FUT", security_id: 56954, sector: "Metals" },
-  { name: "HINDCOPPER JUN FUT", security_id: 56955, sector: "Metals" },
-  { name: "HINDPETRO JUN FUT", security_id: 56956, sector: "Oil & Gas" },
-  { name: "HINDUNILVR JUN FUT", security_id: 56957, sector: "FMCG" },
-   { name: "HINDZINC JUN FUT", security_id: 56966, sector: "Metals" },
-  { name: "HUDCO JUN FUT", security_id: 56967, sector: "Financial Services" },
-  { name: "ICICIBANK JUN FUT", security_id: 56968, sector: "Banking" },
-  { name: "ICICIGI JUN FUT", security_id: 56969, sector: "Insurance" },
-  { name: "ICICIPRULI JUN FUT", security_id: 56970, sector: "Insurance" },
-  { name: "IDEA JUN FUT", security_id: 56971, sector: "Telecom" },
-  { name: "IDFCFIRSTB JUN FUT", security_id: 56972, sector: "Banking" },
-  { name: "IEX JUN FUT", security_id: 56973, sector: "Utilities" },
-  { name: "IGL JUN FUT", security_id: 56986, sector: "Oil & Gas" },
-  { name: "IIFL JUN FUT", security_id: 56987, sector: "Financial Services" },
-  { name: "INDHOTEL JUN FUT", security_id: 56988, sector: "Hospitality" },
-  { name: "INDIANB JUN FUT", security_id: 56989, sector: "Banking" },
-  { name: "INDIGO JUN FUT", security_id: 56990, sector: "Aviation" },
-  { name: "INDUSINDBK JUN FUT", security_id: 56991, sector: "Banking" },
-  { name: "INDUSTOWER JUN FUT", security_id: 56994, sector: "Telecom" },
-  { name: "INFY JUN FUT", security_id: 56995, sector: "IT" },
-  { name: "INOXWIND JUN FUT", security_id: 57002, sector: "Capital Goods" },
-  { name: "IOC JUN FUT", security_id: 57003, sector: "Oil & Gas" },
-  { name: "IRB JUN FUT", security_id: 57004, sector: "Infrastructure" },
-  { name: "IRCTC JUN FUT", security_id: 57005, sector: "Tourism" },
-  { name: "IREDA JUN FUT", security_id: 57010, sector: "Financial Services" },
-  { name: "IRFC JUN FUT", security_id: 57011, sector: "Financial Services" },
-  { name: "ITC JUN FUT", security_id: 57012, sector: "FMCG" },
-   { name: "JINDALSTEL JUN FUT", security_id: 57013, sector: "Metals" },
-  { name: "JIOFIN JUN FUT", security_id: 57020, sector: "Financial Services" },
-  { name: "JSL JUN FUT", security_id: 57021, sector: "Metals" },
-  { name: "JSWENERGY JUN FUT", security_id: 57024, sector: "Utilities" },
-  { name: "JSWSTEEL JUN FUT", security_id: 57025, sector: "Metals" },
-  { name: "JUBLFOOD JUN FUT", security_id: 57026, sector: "Quick Service Restaurant" },
-  { name: "KALYANKJIL JUN FUT", security_id: 57027, sector: "Retail" },
-  { name: "KEI JUN FUT", security_id: 57032, sector: "Capital Goods" },
-  { name: "KOTAKBANK JUN FUT", security_id: 57033, sector: "Banking" },
-  { name: "KPITTECH JUN FUT", security_id: 57034, sector: "IT" },
-  { name: "LAURUSLABS JUN FUT", security_id: 57035, sector: "Pharmaceuticals" },
-  { name: "LICHSGFIN JUN FUT", security_id: 57038, sector: "Financial Services" },
-  { name: "LICI JUN FUT", security_id: 57039, sector: "Insurance" },
-  { name: "LODHA JUN FUT", security_id: 57042, sector: "Real Estate" },
-  { name: "LT JUN FUT", security_id: 57043, sector: "Infrastructure" },
-  { name: "LTF JUN FUT", security_id: 57048, sector: "Financial Services" },
-  { name: "LTIM JUN FUT", security_id: 57049, sector: "IT" },
-  { name: "LUPIN JUN FUT", security_id: 57050, sector: "Pharmaceuticals" },
-    { name: "M&M JUN FUT", security_id: 57051, sector: "Automotive" },
-  { name: "M&MFIN JUN FUT", security_id: 57052, sector: "Financial Services" },
-  { name: "MANAPPURAM JUN FUT", security_id: 57053, sector: "Financial Services" },
-  { name: "MARICO JUN FUT", security_id: 57054, sector: "FMCG" },
-  { name: "MARUTI JUN FUT", security_id: 57055, sector: "Automotive" },
-  { name: "MAXHEALTH JUN FUT", security_id: 57056, sector: "Healthcare" },
-  { name: "MCX JUN FUT", security_id: 57057, sector: "Financial Services" },
-  { name: "MFSL JUN FUT", security_id: 57058, sector: "Insurance" },
-  { name: "MGL JUN FUT", security_id: 57059, sector: "Oil & Gas" },
-  { name: "MOTHERSON JUN FUT", security_id: 57060, sector: "Automotive" },
-  { name: "MPHASIS JUN FUT", security_id: 57061, sector: "IT" },
-  { name: "MUTHOOTFIN JUN FUT", security_id: 57062, sector: "Financial Services" },
-  { name: "NATIONALUM JUN FUT", security_id: 57063, sector: "Metals" },
-  { name: "NAUKRI JUN FUT", security_id: 57064, sector: "IT" },
-  { name: "NBCC JUN FUT", security_id: 57065, sector: "Construction" },
-  { name: "NCC JUN FUT", security_id: 57066, sector: "Construction" },
-  { name: "NESTLEIND JUN FUT", security_id: 57067, sector: "FMCG" },
-  { name: "NHPC JUN FUT", security_id: 57068, sector: "Utilities" },
-   { name: "NMDC JUN FUT", security_id: 57069, sector: "Metals" },
-  { name: "NTPC JUN FUT", security_id: 57070, sector: "Utilities" },
-  { name: "NYKAA JUN FUT", security_id: 57071, sector: "Retail" },
-  { name: "OBEROIRLTY JUN FUT", security_id: 57072, sector: "Real Estate" },
-  { name: "OFSS JUN FUT", security_id: 57073, sector: "IT" },
-  { name: "OIL JUN FUT", security_id: 57074, sector: "Oil & Gas" },
-  { name: "ONGC JUN FUT", security_id: 57075, sector: "Oil & Gas" },
-  { name: "PAGEIND JUN FUT", security_id: 57077, sector: "Textiles" },
-  { name: "PATANJALI JUN FUT", security_id: 57079, sector: "FMCG" },
-  { name: "PAYTM JUN FUT", security_id: 57080, sector: "IT" },
-  { name: "PEL JUN FUT", security_id: 57081, sector: "Financial Services" },
-  { name: "PERSISTENT JUN FUT", security_id: 57082, sector: "IT" },
-    { name: "PETRONET JUN FUT", security_id: 57083, sector: "Oil & Gas" },
-  { name: "PFC JUN FUT", security_id: 57084, sector: "Financial Services" },
-  { name: "PHOENIXLTD JUN FUT", security_id: 57085, sector: "Real Estate" },
-  { name: "PIDILITIND JUN FUT", security_id: 57086, sector: "Chemicals" },
-  { name: "PIIND JUN FUT", security_id: 57087, sector: "Chemicals" },
-  { name: "PNB JUN FUT", security_id: 57088, sector: "Banking" },
-  { name: "PNBHOUSING JUN FUT", security_id: 57091, sector: "Financial Services" },
-  { name: "POLICYBZR JUN FUT", security_id: 57092, sector: "IT" },
-  { name: "POLYCAB JUN FUT", security_id: 57093, sector: "Capital Goods" },
-   { name: "POONAWALLA JUN FUT", security_id: 57094, sector: "Financial Services" },
-  { name: "POWERGRID JUN FUT", security_id: 57095, sector: "Utilities" },
-  { name: "PRESTIGE JUN FUT", security_id: 57100, sector: "Real Estate" },
-  { name: "RBLBANK JUN FUT", security_id: 57101, sector: "Banking" },
-  { name: "RECLTD JUN FUT", security_id: 57104, sector: "Financial Services" },
-  { name: "RELIANCE JUN FUT", security_id: 57105, sector: "Conglomerate" },
-  { name: "SAIL JUN FUT", security_id: 57110, sector: "Metals" },
-  { name: "SBICARD JUN FUT", security_id: 57111, sector: "Financial Services" },
-  { name: "SBILIFE JUN FUT", security_id: 57112, sector: "Insurance" },
-  { name: "SBIN JUN FUT", security_id: 57113, sector: "Banking" },
-  { name: "SHREECEM JUN FUT", security_id: 57114, sector: "Cement" },
-  { name: "SHRIRAMFIN JUN FUT", security_id: 57115, sector: "Financial Services" },
-  { name: "SIEMENS JUN FUT", security_id: 57120, sector: "Capital Goods" },
-  { name: "SJVN JUN FUT", security_id: 57121, sector: "Utilities" },
-  { name: "SOLARINDS JUN FUT", security_id: 57122, sector: "Chemicals" },
-  { name: "SONACOMS JUN FUT", security_id: 57123, sector: "Automotive" },
-  { name: "SRF JUN FUT", security_id: 57128, sector: "Chemicals" },
-  { name: "SUNPHARMA JUN FUT", security_id: 57129, sector: "Pharmaceuticals" },
-  { name: "SUPREMEIND JUN FUT", security_id: 57200, sector: "Consumer Durables" },
-  { name: "SYNGENE JUN FUT", security_id: 57201, sector: "Pharmaceuticals" },
-  { name: "TATACHEM JUN FUT", security_id: 57222, sector: "Chemicals" },
-  { name: "TATACOMM JUN FUT", security_id: 57223, sector: "Telecom" },
-  { name: "TATACONSUM JUN FUT", security_id: 57224, sector: "FMCG" },
-  { name: "TATAELXSI JUN FUT", security_id: 57225, sector: "IT" },
-  { name: "TATAMOTORS JUN FUT", security_id: 57238, sector: "Automotive" },
-  { name: "TATAPOWER JUN FUT", security_id: 57239, sector: "Utilities" },
-  { name: "TATASTEEL JUN FUT", security_id: 57248, sector: "Metals" },
-  { name: "TATATECH JUN FUT", security_id: 57249, sector: "IT" },
-  { name: "TCS JUN FUT", security_id: 57250, sector: "IT" },
-  { name: "TECHM JUN FUT", security_id: 57251, sector: "IT" },
-  { name: "TIINDIA JUN FUT", security_id: 57252, sector: "Automotive" },
-  { name: "TITAGARH JUN FUT", security_id: 57253, sector: "Capital Goods" },
-  { name: "TITAN JUN FUT", security_id: 57254, sector: "Consumer Discretionary" },
-   { name: "TORNTPHARM JUN FUT", security_id: 57255, sector: "Pharmaceuticals" },
-  { name: "TORNTPOWER JUN FUT", security_id: 57256, sector: "Utilities" },
-  { name: "TRENT JUN FUT", security_id: 57257, sector: "Retail" },
-  { name: "TVSMOTOR JUN FUT", security_id: 57258, sector: "Automotive" },
-  { name: "ULTRACEMCO JUN FUT", security_id: 57261, sector: "Cement" },
-  { name: "UNIONBANK JUN FUT", security_id: 57262, sector: "Banking" },
-  { name: "UNITDSPR JUN FUT", security_id: 57263, sector: "FMCG" },
-  { name: "UPL JUN FUT", security_id: 57264, sector: "Chemicals" },
-  { name: "VBL JUN FUT", security_id: 57273, sector: "FMCG" },
-   { name: "VEDL JUN FUT", security_id: 57274, sector: "Metals" },
-  { name: "VOLTAS JUN FUT", security_id: 57275, sector: "Consumer Durables" },
-  { name: "WIPRO JUN FUT", security_id: 57276, sector: "IT" },
-  { name: "YESBANK JUN FUT", security_id: 57277, sector: "Banking" },
-  { name: "ETERNAL JUN FUT", security_id: 57278, sector: "Healthcare" },
-  { name: "ZYDUSLIFE JUN FUT", security_id: 57283, sector: "Pharmaceuticals" },
-   { name: "BDL JUN FUT", security_id: 64224, sector: "Defence" },
-  { name: "BLUESTARCO JUN FUT", security_id: 64232, sector: "Consumer Durables" },
-  { name: "FORTIS JUN FUT", security_id: 64411, sector: "Healthcare" },
-  { name: "KAYNES JUN FUT", security_id: 64623, sector: "IT" },
-  { name: "MANKIND JUN FUT", security_id: 64898, sector: "Pharmaceuticals" },
-  { name: "MAZDOCK JUN FUT", security_id: 64906, sector: "Defence" },
-  { name: "PPLPHARMA JUN FUT", security_id: 64987, sector: "Pharmaceuticals" },
-  { name: "RVNL JUN FUT", security_id: 64996, sector: "Infrastructure" },
-  { name: "UNOMINDA JUN FUT", security_id: 65236, sector: "Automotive" },
-
-  // ...add more as needed
+  { name: "360ONE JUL FUT", security_id: 53003, sector: "Financial Services" },
+  { name: "AMBER JUL FUT", security_id: 53027, sector: "Chemicals" },
+  { name: "AARTIIND JUL FUT", security_id: 53218, sector: "Chemicals" },
+  { name: "ABB JUL FUT", security_id: 53219, sector: "Capital Goods" },
+  { name: "ABCAPITAL JUL FUT", security_id: 53220, sector: "Financial Services" },
+  { name: "ABFRL JUL FUT", security_id: 53221, sector: "Consumer Discretionary" },
+  { name: "ACC JUL FUT", security_id: 53222, sector: "Cement" },
+  { name: "ADANIENSOL JUL FUT", security_id: 53223, sector: "Utilities" },
+  { name: "ADANIENT JUL FUT", security_id: 53224, sector: "Conglomerate" },
+  { name: "ADANIGREEN JUL FUT", security_id: 53225, sector: "Utilities" },
+  { name: "ADANIPORTS JUL FUT", security_id: 53226, sector: "Logistics" },
+  { name: "ALKEM JUL FUT", security_id: 53227, sector: "Pharmaceuticals" },
+  { name: "AMBUJACEM JUL FUT", security_id: 53235, sector: "Cement" },
+  { name: "ANGELONE JUL FUT", security_id: 53236, sector: "Financial Services" },
+  { name: "APLAPOLLO JUL FUT", security_id: 53240, sector: "Metals" },
+  { name: "APOLLOHOSP JUL FUT", security_id: 53241, sector: "Healthcare" },
+  { name: "ASHOKLEY JUL FUT", security_id: 53244, sector: "Automotive" },
+  { name: "ASIANPAINT JUL FUT", security_id: 53245, sector: "Paints" },
+  { name: "ASTRAL JUL FUT", security_id: 53246, sector: "Industrials" },
+  { name: "ATGL JUL FUT", security_id: 53247, sector: "Utilities" },
+  { name: "AUBANK JUL FUT", security_id: 53248, sector: "Banking" },
+  { name: "AUROPHARMA JUL FUT", security_id: 53249, sector: "Pharmaceuticals" },
+  { name: "AXISBANK JUL FUT", security_id: 53250, sector: "Banking" },
+  { name: "BAJAJ-AUTO JUL FUT", security_id: 53251, sector: "Automotive" },
+  { name: "BAJAJFINSV JUL FUT", security_id: 53252, sector: "Financial Services" },
+  { name: "BAJFINANCE JUL FUT", security_id: 53253, sector: "Financial Services" },
+  { name: "BALKRISIND JUL FUT", security_id: 53254, sector: "Automotive" },
+  { name: "BANDHANBNK JUL FUT", security_id: 53255, sector: "Banking" },
+  { name: "BANKBARODA JUL FUT", security_id: 53256, sector: "Banking" },
+  { name: "BANKINDIA JUL FUT", security_id: 53257, sector: "Banking" },
+  { name: "BEL JUL FUT", security_id: 53258, sector: "Defence" },
+  { name: "BHARATFORG JUL FUT", security_id: 53259, sector: "Automotive" },
+  { name: "BHARTIARTL JUL FUT", security_id: 53260, sector: "Telecom" },
+  { name: "BHEL JUL FUT", security_id: 53261, sector: "Capital Goods" },
+  { name: "BIOCON JUL FUT", security_id: 53262, sector: "Pharmaceuticals" },
+  { name: "BOSCHLTD JUL FUT", security_id: 53263, sector: "Automotive" },
+  { name: "BPCL JUL FUT", security_id: 53264, sector: "Oil & Gas" },
+  { name: "BRITANNIA JUL FUT", security_id: 53265, sector: "FMCG" },
+  { name: "BSE JUL FUT", security_id: 53268, sector: "Financial Services" },
+  { name: "BSOFT JUL FUT", security_id: 53269, sector: "IT" },
+  { name: "CAMS JUL FUT", security_id: 53270, sector: "Financial Services" },
+  { name: "CANBK JUL FUT", security_id: 53273, sector: "Banking" },
+  { name: "CDSL JUL FUT", security_id: 53274, sector: "Financial Services" },
+  { name: "CESC JUL FUT", security_id: 53275, sector: "Utilities" },
+  { name: "CGPOWER JUL FUT", security_id: 53276, sector: "Capital Goods" },
+  { name: "CHAMBLFERT JUL FUT", security_id: 53277, sector: "Fertilizers" },
+  { name: "CHOLAFIN JUL FUT", security_id: 53278, sector: "Financial Services" },
+  { name: "CIPLA JUL FUT", security_id: 53279, sector: "Pharmaceuticals" },
+  { name: "COALINDIA JUL FUT", security_id: 53280, sector: "Metals" },
+  { name: "COFORGE JUL FUT", security_id: 53281, sector: "IT" },
+  { name: "COLPAL JUL FUT", security_id: 53284, sector: "FMCG" },
+  { name: "CONCOR JUL FUT", security_id: 53286, sector: "Logistics" },
+  { name: "CROMPTON JUL FUT", security_id: 53289, sector: "Consumer Durables" },
+  { name: "CUMMINSIND JUL FUT", security_id: 53290, sector: "Capital Goods" },
+  { name: "CYIENT JUL FUT", security_id: 53291, sector: "IT" },
+  { name: "DABUR JUL FUT", security_id: 53292, sector: "FMCG" },
+  { name: "DALBHARAT JUL FUT", security_id: 53293, sector: "Cement" },
+  { name: "DELHIVERY JUL FUT", security_id: 53294, sector: "Logistics" },
+  { name: "DIVISLAB JUL FUT", security_id: 53295, sector: "Pharmaceuticals" },
+  { name: "DIXON JUL FUT", security_id: 53296, sector: "Consumer Durables" },
+  { name: "DLF JUL FUT", security_id: 53297, sector: "Real Estate" },
+  { name: "DMART JUL FUT", security_id: 53298, sector: "Retail" },
+  { name: "DRREDDY JUL FUT", security_id: 53299, sector: "Pharmaceuticals" },
+  { name: "EICHERMOT JUL FUT", security_id: 53300, sector: "Automotive" },
+  { name: "ETERNAL JUL FUT", security_id: 53302, sector: "Healthcare" },
+  { name: "EXIDEIND JUL FUT", security_id: 53303, sector: "Automotive" },
+  { name: "FEDERALBNK JUL FUT", security_id: 53304, sector: "Banking" },
+  { name: "GAIL JUL FUT", security_id: 53305, sector: "Oil & Gas" },
+  { name: "GLENMARK JUL FUT", security_id: 53306, sector: "Pharmaceuticals" },
+  { name: "GMRAIRPORT JUL FUT", security_id: 53307, sector: "Logistics" },
+  { name: "GODREJCP JUL FUT", security_id: 53308, sector: "FMCG" },
+  { name: "GODREJPROP JUL FUT", security_id: 53309, sector: "Real Estate" },
+  { name: "GRANULES JUL FUT", security_id: 53310, sector: "Pharmaceuticals" },
+  { name: "GRASIM JUL FUT", security_id: 53311, sector: "Cement" },
+  { name: "HAL JUL FUT", security_id: 53312, sector: "Defence" },
+  { name: "HAVELLS JUL FUT", security_id: 53313, sector: "Consumer Durables" },
+  { name: "HCLTECH JUL FUT", security_id: 53314, sector: "IT" },
+  { name: "HDFCAMC JUL FUT", security_id: 53315, sector: "Financial Services" },
+  { name: "HDFCBANK JUL FUT", security_id: 53316, sector: "Banking" },
+  { name: "HDFCLIFE JUL FUT", security_id: 53317, sector: "Insurance" },
+  { name: "HEROMOTOCO JUL FUT", security_id: 53318, sector: "Automotive" },
+  { name: "HFCL JUL FUT", security_id: 53319, sector: "Telecom" },
+  { name: "HINDALCO JUL FUT", security_id: 53321, sector: "Metals" },
+  { name: "HINDCOPPER JUL FUT", security_id: 53322, sector: "Metals" },
+  { name: "HINDPETRO JUL FUT", security_id: 53323, sector: "Oil & Gas" },
+  { name: "HINDUNILVR JUL FUT", security_id: 53324, sector: "FMCG" },
+  { name: "HINDZINC JUL FUT", security_id: 53325, sector: "Metals" },
+  { name: "HUDCO JUL FUT", security_id: 53326, sector: "Financial Services" },
+  { name: "ICICIBANK JUL FUT", security_id: 53327, sector: "Banking" },
+  { name: "ICICIGI JUL FUT", security_id: 53328, sector: "Insurance" },
+  { name: "ICICIPRULI JUL FUT", security_id: 53329, sector: "Insurance" },
+  { name: "IDEA JUL FUT", security_id: 53330, sector: "Telecom" },
+  { name: "IDFCFIRSTB JUL FUT", security_id: 53334, sector: "Banking" },
+  { name: "IEX JUL FUT", security_id: 53335, sector: "Utilities" },
+  { name: "IGL JUL FUT", security_id: 53336, sector: "Oil & Gas" },
+  { name: "IIFL JUL FUT", security_id: 53337, sector: "Financial Services" },
+  { name: "INDHOTEL JUL FUT", security_id: 53338, sector: "Hospitality" },
+  { name: "INDIANB JUL FUT", security_id: 53339, sector: "Banking" },
+  { name: "INDIGO JUL FUT", security_id: 53340, sector: "Aviation" },
+  { name: "INDUSINDBK JUL FUT", security_id: 53341, sector: "Banking" },
+  { name: "INDUSTOWER JUL FUT", security_id: 53342, sector: "Telecom" },
+  { name: "INFY JUL FUT", security_id: 53343, sector: "IT" },
+  { name: "INOXWIND JUL FUT", security_id: 53344, sector: "Capital Goods" },
+  { name: "IOC JUL FUT", security_id: 53345, sector: "Oil & Gas" },
+  { name: "IRB JUL FUT", security_id: 53346, sector: "Infrastructure" },
+  { name: "IRCTC JUL FUT", security_id: 53347, sector: "Tourism" },
+  { name: "IREDA JUL FUT", security_id: 53348, sector: "Financial Services" },
+  { name: "IRFC JUL FUT", security_id: 53351, sector: "Financial Services" },
+  { name: "ITC JUL FUT", security_id: 53352, sector: "FMCG" },
+  { name: "JINDALSTEL JUL FUT", security_id: 53353, sector: "Metals" },
+  { name: "JIOFIN JUL FUT", security_id: 53354, sector: "Financial Services" },
+  { name: "JSL JUL FUT", security_id: 53355, sector: "Metals" },
+  { name: "JSWENERGY JUL FUT", security_id: 53358, sector: "Utilities" },
+  { name: "JSWSTEEL JUL FUT", security_id: 53359, sector: "Metals" },
+  { name: "JUBLFOOD JUL FUT", security_id: 53366, sector: "Quick Service Restaurant" },
+  { name: "KALYANKJIL JUL FUT", security_id: 53367, sector: "Retail" },
+  { name: "KEI JUL FUT", security_id: 53368, sector: "Capital Goods" },
+  { name: "KOTAKBANK JUL FUT", security_id: 53369, sector: "Banking" },
+  { name: "KPITTECH JUL FUT", security_id: 53370, sector: "IT" },
+  { name: "LAURUSLABS JUL FUT", security_id: 53371, sector: "Pharmaceuticals" },
+  { name: "LICHSGFIN JUL FUT", security_id: 53372, sector: "Financial Services" },
+  { name: "LICI JUL FUT", security_id: 53373, sector: "Insurance" },
+  { name: "LODHA JUL FUT", security_id: 53374, sector: "Real Estate" },
+  { name: "LT JUL FUT", security_id: 53375, sector: "Infrastructure" },
+  { name: "LTF JUL FUT", security_id: 53376, sector: "Financial Services" },
+  { name: "LTIM JUL FUT", security_id: 53377, sector: "IT" },
+  { name: "LUPIN JUL FUT", security_id: 53378, sector: "Pharmaceuticals" },
+  { name: "M&M JUL FUT", security_id: 53379, sector: "Automotive" },
+  { name: "M&MFIN JUL FUT", security_id: 53380, sector: "Financial Services" },
+  { name: "MANAPPURAM JUL FUT", security_id: 53381, sector: "Financial Services" },
+  { name: "MARICO JUL FUT", security_id: 53382, sector: "FMCG" },
+  { name: "MARUTI JUL FUT", security_id: 53383, sector: "Automotive" },
+  { name: "MAXHEALTH JUL FUT", security_id: 53384, sector: "Healthcare" },
+  { name: "MCX JUL FUT", security_id: 53385, sector: "Financial Services" },
+  { name: "MFSL JUL FUT", security_id: 53386, sector: "Insurance" },
+  { name: "MGL JUL FUT", security_id: 53387, sector: "Oil & Gas" },
+  { name: "MOTHERSON JUL FUT", security_id: 53388, sector: "Automotive" },
+  { name: "MPHASIS JUL FUT", security_id: 53389, sector: "IT" },
+  { name: "MUTHOOTFIN JUL FUT", security_id: 53390, sector: "Financial Services" },
+  { name: "NATIONALUM JUL FUT", security_id: 53391, sector: "Metals" },
+  { name: "NAUKRI JUL FUT", security_id: 53392, sector: "IT" },
+  { name: "NBCC JUL FUT", security_id: 53393, sector: "Construction" },
+  { name: "NCC JUL FUT", security_id: 53394, sector: "Construction" },
+  { name: "NESTLEIND JUL FUT", security_id: 53395, sector: "FMCG" },
+  { name: "NHPC JUL FUT", security_id: 53396, sector: "Utilities" },
+  { name: "NMDC JUL FUT", security_id: 53397, sector: "Metals" },
+  { name: "NTPC JUL FUT", security_id: 53398, sector: "Utilities" },
+  { name: "NYKAA JUL FUT", security_id: 53399, sector: "Retail" },
+  { name: "OBEROIRLTY JUL FUT", security_id: 53402, sector: "Real Estate" },
+  { name: "OFSS JUL FUT", security_id: 53403, sector: "IT" },
+  { name: "OIL JUL FUT", security_id: 53404, sector: "Oil & Gas" },
+  { name: "ONGC JUL FUT", security_id: 53405, sector: "Oil & Gas" },
+  { name: "PAGEIND JUL FUT", security_id: 53406, sector: "Textiles" },
+  { name: "PATANJALI JUL FUT", security_id: 53407, sector: "FMCG" },
+  { name: "PAYTM JUL FUT", security_id: 53408, sector: "IT" },
+  { name: "PEL JUL FUT", security_id: 53409, sector: "Financial Services" },
+  { name: "PERSISTENT JUL FUT", security_id: 53413, sector: "IT" },
+  { name: "PETRONET JUL FUT", security_id: 53414, sector: "Oil & Gas" },
+  { name: "PFC JUL FUT", security_id: 53415, sector: "Financial Services" },
+  { name: "PHOENIXLTD JUL FUT", security_id: 53416, sector: "Real Estate" },
+  { name: "PIDILITIND JUL FUT", security_id: 53418, sector: "Chemicals" },
+  { name: "PIIND JUL FUT", security_id: 53419, sector: "Chemicals" },
+  { name: "PNB JUL FUT", security_id: 53420, sector: "Banking" },
+  { name: "PNBHOUSING JUL FUT", security_id: 53421, sector: "Financial Services" },
+  { name: "POLICYBZR JUL FUT", security_id: 53422, sector: "IT" },
+  { name: "POLYCAB JUL FUT", security_id: 53423, sector: "Capital Goods" },
+  { name: "POONAWALLA JUL FUT", security_id: 53424, sector: "Financial Services" },
+  { name: "POWERGRID JUL FUT", security_id: 53425, sector: "Utilities" },
+  { name: "PRESTIGE JUL FUT", security_id: 53426, sector: "Real Estate" },
+  { name: "RBLBANK JUL FUT", security_id: 53427, sector: "Banking" },
+  { name: "RECLTD JUL FUT", security_id: 53428, sector: "Financial Services" },
+  { name: "RELIANCE JUL FUT", security_id: 53429, sector: "Conglomerate" },
+  { name: "SAIL JUL FUT", security_id: 53430, sector: "Metals" },
+  { name: "SBICARD JUL FUT", security_id: 53431, sector: "Financial Services" },
+  { name: "SBILIFE JUL FUT", security_id: 53432, sector: "Insurance" },
+  { name: "SBIN JUL FUT", security_id: 53433, sector: "Banking" },
+  { name: "SHREECEM JUL FUT", security_id: 53434, sector: "Cement" },
+  { name: "SHRIRAMFIN JUL FUT", security_id: 53435, sector: "Financial Services" },
+  { name: "SIEMENS JUL FUT", security_id: 53436, sector: "Capital Goods" },
+  { name: "SJVN JUL FUT", security_id: 53437, sector: "Utilities" },
+  { name: "SOLARINDS JUL FUT", security_id: 53438, sector: "Chemicals" },
+  { name: "SONACOMS JUL FUT", security_id: 53439, sector: "Automotive" },
+  { name: "SRF JUL FUT", security_id: 53440, sector: "Chemicals" },
+  { name: "SUNPHARMA JUL FUT", security_id: 53441, sector: "Pharmaceuticals" },
+  { name: "SUPREMEIND JUL FUT", security_id: 53442, sector: "Consumer Durables" },
+  { name: "SYNGENE JUL FUT", security_id: 53443, sector: "Pharmaceuticals" },
+  { name: "TATACHEM JUL FUT", security_id: 53448, sector: "Chemicals" },
+  { name: "TATACOMM JUL FUT", security_id: 53449, sector: "Telecom" },
+  { name: "TATACONSUM JUL FUT", security_id: 53450, sector: "FMCG" },
+  { name: "TATAELXSI JUL FUT", security_id: 53451, sector: "IT" },
+  { name: "TATAMOTORS JUL FUT", security_id: 53452, sector: "Automotive" },
+  { name: "TATAPOWER JUL FUT", security_id: 53453, sector: "Utilities" },
+  { name: "TATASTEEL JUL FUT", security_id: 53454, sector: "Metals" },
+  { name: "TATATECH JUL FUT", security_id: 53455, sector: "IT" },
+  { name: "TCS JUL FUT", security_id: 53460, sector: "IT" },
+  { name: "TECHM JUL FUT", security_id: 53461, sector: "IT" },
+  { name: "TIINDIA JUL FUT", security_id: 53464, sector: "Automotive" },
+  { name: "TITAGARH JUL FUT", security_id: 53465, sector: "Capital Goods" },
+  { name: "TITAN JUL FUT", security_id: 53466, sector: "Consumer Discretionary" },
+  { name: "TORNTPHARM JUL FUT", security_id: 53467, sector: "Pharmaceuticals" },
+  { name: "TORNTPOWER JUL FUT", security_id: 53468, sector: "Utilities" },
+  { name: "TRENT JUL FUT", security_id: 53469, sector: "Retail" },
+  { name: "TVSMOTOR JUL FUT", security_id: 53470, sector: "Automotive" },
+  { name: "ULTRACEMCO JUL FUT", security_id: 53471, sector: "Cement" },
+  { name: "UNIONBANK JUL FUT", security_id: 53472, sector: "Banking" },
+  { name: "UNITDSPR JUL FUT", security_id: 53473, sector: "FMCG" },
+  { name: "UPL JUL FUT", security_id: 53474, sector: "Chemicals" },
+  { name: "VBL JUL FUT", security_id: 53475, sector: "FMCG" },
+  { name: "VEDL JUL FUT", security_id: 53478, sector: "Metals" },
+  { name: "VOLTAS JUL FUT", security_id: 53479, sector: "Consumer Durables" },
+  { name: "WIPRO JUL FUT", security_id: 53480, sector: "IT" },
+  { name: "YESBANK JUL FUT", security_id: 53481, sector: "Banking" },
+  { name: "ZYDUSLIFE JUL FUT", security_id: 53484, sector: "Pharmaceuticals" },
+  { name: "PGEL JUL FUT", security_id: 53763, sector: "Utilities" },
+  { name: "BDL JUL FUT", security_id: 64225, sector: "Defence" },
+  { name: "BLUESTARCO JUL FUT", security_id: 64233, sector: "Consumer Durables" },
+  { name: "FORTIS JUL FUT", security_id: 64412, sector: "Healthcare" },
+  { name: "KAYNES JUL FUT", security_id: 64624, sector: "IT" },
+  { name: "MANKIND JUL FUT", security_id: 64901, sector: "Pharmaceuticals" },
+  { name: "MAZDOCK JUL FUT", security_id: 64907, sector: "Defence" },
+  { name: "PPLPHARMA JUL FUT", security_id: 64988, sector: "Pharmaceuticals" },
+  { name: "RVNL JUL FUT", security_id: 64997, sector: "Infrastructure" },
+  { name: "UNOMINDA JUL FUT", security_id: 65239, sector: "Automotive" }
 ];
 
 interface StockData {
@@ -632,83 +704,87 @@ interface StockData {
   change?: number;
   [key: string]: any;
 }
+
 app.get('/api/heatmap', async (req, res) => {
   try {
-    const collection = db.collection('nse_fno');
-    console.log('Connected to collection:', collection.collectionName);
+    const collection = db.collection('nse_fno_stock');
+    
+    // Pre-process security data for faster lookups
+    const securityIdMap = new Map<string, { name: string; sector: string }>();
+    const securityIdStrings = new Set<string>();
+    
+    securities.forEach(sec => {
+      const idStr = sec.security_id.toString();
+      securityIdMap.set(idStr, { 
+        name: sec.name, 
+        sector: sec.sector 
+      });
+      securityIdStrings.add(idStr);
+    });
 
-    const securityIds = securities.map(s => s.security_id);
-    console.log(`Looking for ${securityIds.length} securities:`, securityIds.slice(0, 5), '...'); // Show first 5 IDs
-
-    // Query as any[]
-    let items: any[] = await collection.find({ security_id: { $in: securityIds } })
-      .sort({ _id: -1 })
-      
-      .toArray();
-    console.log(`First query found ${items.length} items with numeric security_ids`);
-
-    // If none found, try string IDs
-    if (!items || items.length === 0) {
-      console.log('Trying with string security_ids...');
-      items = await collection.find({ security_id: { $in: securityIds.map(id => id.toString()) } })
-        .sort({ _id: -1 })
-        
-        .toArray();
-        console.log(`Second query found ${items.length} items with string security_ids`);
-    }
-
-    // Fallback: get latest 50 (unfiltered)
-    let fallbackItems: any[] = [];
-    if (!items || items.length === 0) {
-      console.log('No items found with security_ids, falling back to latest 50');
-      try {
-        fallbackItems = await collection.find({}).sort({ _id: -1 }).limit(50).toArray();
-        console.log(`Fallback query found ${fallbackItems.length} items`);
-      } catch (fallbackError: unknown) {
-        let msg = 'Unknown fallback error';
-        if (fallbackError instanceof Error) {
-          msg = fallbackError.message;
+    // Optimized aggregation pipeline
+    const pipeline = [
+      {
+        $match: {
+          security_id: { $in: Array.from(securityIdStrings) }
         }
-        console.error('Error during fallback DB query:', msg);
-        fallbackItems = [];
+      },
+      {
+        $sort: { received_at: -1 }
+      },
+      {
+        $group: {
+          _id: "$security_id",
+          latestDoc: { $first: "$$ROOT" }
+        }
+      },
+      {
+        $replaceRoot: { newRoot: "$latestDoc" }
+      },
+      {
+        $project: {
+          security_id: 1,
+          LTP: 1,
+          close: 1,
+          received_at: 1,
+          // Include any other fields you need
+        }
       }
-    }
+    ];
 
-    const resultItems: any[] =
-      (Array.isArray(items) && items.length > 0)
-        ? items
-        : (Array.isArray(fallbackItems) ? fallbackItems : []);
-         console.log(`Total items to process: ${resultItems.length}`);
+    // Use cursor for better memory efficiency
+    const cursor = collection.aggregate(pipeline);
+    const items = await cursor.toArray();
 
-    // Attach trading_symbol and sector from securities list
-    const processedItems: StockData[] = resultItems.map((item) => {
-      const secIdNum = Number(item.security_id); // Always compare as number
-      const found = securities.find(sec => Number(sec.security_id) === secIdNum);
+    // Process items in a single pass
+    const processedItems = items.map(item => {
+      const securityInfo = securityIdMap.get(item.security_id.toString());
+      const ltp = parseFloat(item.LTP);
+      const close = parseFloat(item.close);
+      const change = !isNaN(ltp) && !isNaN(close) 
+        ? ((ltp - close) / close) * 100 
+        : undefined;
+
       return {
         ...item,
-        trading_symbol: found ? found.name : '',
-        sector: found ? found.sector : (item.sector || 'Unknown')
+        trading_symbol: securityInfo?.name || '',
+        sector: securityInfo?.sector || 'Unknown',
+        change: change
       };
     });
 
-    console.log('\nFinal processed items count:', processedItems.length);
-    console.log('Sample of first 5 processed items:');
-    console.log(JSON.stringify(processedItems.slice(0, 5), null, 2)); // Print first 5 for debug
-
+    // Cache control with conditional GET support
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=30');
+    res.setHeader('Vary', 'Accept-Encoding');
     res.json(processedItems);
-  } catch (error: unknown) {
-    let msg = 'Unknown error';
-    if (error instanceof Error) {
-      msg = error.message;
-    }
-    console.error('\nError fetching heatmap data:', error);
+  } catch (error) {
+    console.error('Error fetching heatmap data:', error);
     res.status(500).json({
       error: 'Internal server error',
-      details: msg
+      details: error instanceof Error ? error.message : 'Unknown error'
     });
   }
 });
-
 
 
 
@@ -736,13 +812,13 @@ function normalizeDate(dateString: string, source: 'nse' | 'cash' | 'nifty'): st
       // "17-Mar-25" → "DD-MM-YYYY"
       const parts = dateString.trim().split("-");
       if (parts.length !== 3) return null;
-      
+
       const [d, mStr, yShort] = parts;
       const months: Record<string, string> = {
         Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06",
         Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12"
       };
-      
+
       day = d.padStart(2, "0");
       month = months[mStr] || ''; // Provide fallback for invalid month
       year = yShort.length === 2 ? `20${yShort}` : yShort;
@@ -750,13 +826,13 @@ function normalizeDate(dateString: string, source: 'nse' | 'cash' | 'nifty'): st
       // "02-APR-2025" → "DD-MM-YYYY"
       const parts = dateString.trim().split("-");
       if (parts.length !== 3) return null;
-      
+
       const [d, mStr, y] = parts;
       const months: Record<string, string> = {
         JAN: "01", FEB: "02", MAR: "03", APR: "04", MAY: "05", JUN: "06",
         JUL: "07", AUG: "08", SEP: "09", OCT: "10", NOV: "11", DEC: "12"
       };
-      
+
       day = d.padStart(2, "0");
       month = months[mStr.toUpperCase()] || ''; // Provide fallback for invalid month
       year = y;
@@ -774,7 +850,6 @@ function normalizeDate(dateString: string, source: 'nse' | 'cash' | 'nifty'): st
   }
 }
 
- 
 
 
 
@@ -823,7 +898,7 @@ app.get("/api/data", async (req, res) => {
   try {
     const nseColl = db.collection("nse");
     const niftyColl = db.collection("Nifty");
- 
+
     // Fetch all FII rows from NSE
     const nseRows = await nseColl
       .find({ "Client Type": "FII" }, {
@@ -1228,764 +1303,389 @@ app.get("/api/Pro_Index_Opt/data", async (req, res) => {
           "Option Index Put Short": 1,
           _id: 0
         }
-
       })
-
       .sort({ Date: 1 })
-
       .toArray();
-
- 
 
     const niftyRows = await niftyColl
-
       .find({}, { projection: { Date: 1, Close: 1, _id: 0 } })
-
       .toArray();
-
- 
 
     const niftyMap: Record<string, number> = {};
 
     niftyRows.forEach(nifty => {
-
       const norm = dayjs(nifty.Date, "DD-MMM-YYYY").format("YYYY-MM-DD");
-
       niftyMap[norm] = Number(nifty.Close);
-
     });
 
- 
-
     const result = rows.map(row => ({
-
       Date: row.Date,
-
       Pro_Call_Change:
-
         (row["Option Index Call Long"] || 0) - (row["Option Index Call Short"] || 0),
-
       Pro_Put_Change:
-
         (row["Option Index Put Long"] || 0) - (row["Option Index Put Short"] || 0),
-
       NIFTY_Value: niftyMap[row.Date] ?? null,
-
     }));
 
- 
-
     res.json(result);
-
   } catch (err) {
-
     console.error("Error in /api/Pro_Index_Opt/data:", err);
-
     res.status(500).json({ error: "Internal Server Error" });
-
   }
-
 });
-
- 
 
 // Fetch Pro Index Futures change & Nifty value (with manualPrevNetOI)
-
 app.get("/api/Pro_Index_Fut/data", async (req, res) => {
-
   try {
-
     const nseColl = db.collection("nse");
-
     const niftyColl = db.collection("Nifty");
 
- 
-
     const rows = await nseColl
-
       .find({ "Client Type": "Pro" }, {
-
         projection: {
-
           Date: 1,
-
           "Future Index Long": 1,
-
           "Future Index Short": 1,
-
           _id: 0
-
         }
-
       })
-
       .sort({ Date: 1 })
-
       .toArray();
-
- 
 
     const niftyRows = await niftyColl
-
       .find({}, { projection: { Date: 1, Close: 1, _id: 0 } })
-
       .toArray();
-
- 
 
     const niftyMap: Record<string, number> = {};
 
     niftyRows.forEach(nifty => {
-
       const norm = dayjs(nifty.Date, "DD-MMM-YYYY").format("YYYY-MM-DD");
-
       niftyMap[norm] = Number(nifty.Close);
-
     });
-
- 
 
     const manualPrevNetOI = -29643;
-
     let prevNetOI = manualPrevNetOI;
 
- 
-
     const resultWithChange = rows.map(row => {
-
       const dateStr = row.Date;
-
       const currentNetOI =
-
         (row["Future Index Long"] || 0) - (row["Future Index Short"] || 0);
 
- 
-
       const change =
-
         dateStr === "2025-04-07"
-
           ? currentNetOI - manualPrevNetOI
-
           : currentNetOI - prevNetOI;
-
- 
-
       prevNetOI = currentNetOI;
 
- 
-
       return {
-
         Date: dateStr,
-
         Pro_Index_Futures: change,
-
         NIFTY_Value: niftyMap[dateStr] ?? null,
-
       };
-
     });
 
- 
-
     res.json(resultWithChange);
-
   } catch (err) {
-
     console.error("Error in /api/Pro_Index_Fut/data:", err);
-
     res.status(500).json({ error: "Internal Server Error" });
-
   }
-
 });
-
- 
 
 // Fetch Pro Option Index OI & Nifty value
-
 app.get("/api/OIPro_Index_Opt/data", async (req, res) => {
-
   try {
-
     const nseColl = db.collection("nse");
-
     const niftyColl = db.collection("Nifty");
 
- 
-
     const rows = await nseColl
-
       .find({ "Client Type": "Pro" }, {
-
         projection: {
-
           Date: 1,
-
           "Option Index Call Long": 1,
-
           "Option Index Call Short": 1,
-
           "Option Index Put Long": 1,
-
           "Option Index Put Short": 1,
-
           _id: 0
-
         }
-
       })
-
       .sort({ Date: 1 })
-
       .toArray();
-
- 
 
     const niftyRows = await niftyColl
-
       .find({}, { projection: { Date: 1, Close: 1, _id: 0 } })
-
       .toArray();
 
- 
-
     const niftyMap: Record<string, number> = {};
-
     niftyRows.forEach(nifty => {
-
       const norm = dayjs(nifty.Date, "DD-MMM-YYYY").format("YYYY-MM-DD");
-
       niftyMap[norm] = Number(nifty.Close);
-
     });
 
- 
-
     const result = rows.map(row => ({
-
       Date: row.Date,
-
       Pro_Call_OI:
-
         (row["Option Index Call Long"] || 0) - (row["Option Index Call Short"] || 0),
-
       Pro_Put_OI:
-
         (row["Option Index Put Long"] || 0) - (row["Option Index Put Short"] || 0),
-
       NIFTY_Value: niftyMap[row.Date] ?? null,
-
     }));
 
- 
-
     res.json(result);
-
   } catch (err) {
-
     console.error("Error in /api/OIPro_Index_Opt/data:", err);
-
     res.status(500).json({ error: "Internal Server Error" });
-
   }
-
 });
-
- 
 
 // Fetch Pro Futures OI & Nifty value
-
 app.get("/api/OIPro_Index_Fut/data", async (req, res) => {
-
   try {
-
     const nseColl = db.collection("nse");
-
     const niftyColl = db.collection("Nifty");
 
- 
-
     const rows = await nseColl
-
       .find({ "Client Type": "Pro" }, {
-
         projection: {
-
           Date: 1,
-
           "Future Index Long": 1,
-
           "Future Index Short": 1,
-
           _id: 0
-
         }
-
       })
-
       .sort({ Date: 1 })
-
       .toArray();
-
- 
 
     const niftyRows = await niftyColl
-
       .find({}, { projection: { Date: 1, Close: 1, _id: 0 } })
-
       .toArray();
-
- 
-
     const niftyMap: Record<string, number> = {};
 
     niftyRows.forEach(nifty => {
-
       const norm = dayjs(nifty.Date, "DD-MMM-YYYY").format("YYYY-MM-DD");
-
       niftyMap[norm] = Number(nifty.Close);
-
     });
 
- 
-
     const result = rows.map(row => ({
-
       Date: row.Date,
-
       Pro_Futures_OI:
-
         (row["Future Index Long"] || 0) - (row["Future Index Short"] || 0),
-
       NIFTY_Value: niftyMap[row.Date] ?? null,
-
     }));
 
- 
-
     res.json(result);
-
   } catch (err) {
-
     console.error("Error in /api/OIPro_Index_Fut/data:", err);
-
     res.status(500).json({ error: "Internal Server Error" });
-
   }
-
 });
-
- 
 
 // Fetch Client Option Index change & Nifty value
-
 app.get("/api/Client_Index_Opt/data", async (req, res) => {
-
   try {
-
     const nseColl = db.collection("nse");
-
     const niftyColl = db.collection("Nifty");
 
- 
-
     const rows = await nseColl
-
       .find({ "Client Type": "Client" }, {
-
         projection: {
-
           Date: 1,
-
           "Option Index Call Long": 1,
-
           "Option Index Call Short": 1,
-
           "Option Index Put Long": 1,
-
           "Option Index Put Short": 1,
-
           _id: 0
-
         }
-
       })
-
       .sort({ Date: 1 })
-
       .toArray();
-
- 
 
     const niftyRows = await niftyColl
-
       .find({}, { projection: { Date: 1, Close: 1, _id: 0 } })
-
       .toArray();
-
- 
 
     const niftyMap: Record<string, number> = {};
 
     niftyRows.forEach(nifty => {
-
       const norm = dayjs(nifty.Date, "DD-MMM-YYYY").format("YYYY-MM-DD");
-
       niftyMap[norm] = Number(nifty.Close);
-
     });
-
- 
 
     const result = rows.map(row => ({
-
       Date: row.Date,
-
       Client_Call_Change:
-
         (row["Option Index Call Long"] || 0) - (row["Option Index Call Short"] || 0),
-
       Client_Put_Change:
-
         (row["Option Index Put Long"] || 0) - (row["Option Index Put Short"] || 0),
-
       NIFTY_Value: niftyMap[row.Date] ?? null,
-
     }));
 
- 
-
     res.json(result);
-
   } catch (err) {
-
     console.error("Error in /api/Client_Index_Opt/data:", err);
-
     res.status(500).json({ error: "Internal Server Error" });
-
   }
-
 });
 
- 
-
 // Fetch Client Index Futures change & Nifty value (with manualPrevNetOI)
-
 app.get("/api/Client_Index_Fut/data", async (req, res) => {
-
   try {
-
     const nseColl = db.collection("nse");
-
     const niftyColl = db.collection("Nifty");
 
- 
-
     const rows = await nseColl
-
       .find({ "Client Type": "Client" }, {
-
         projection: {
-
           Date: 1,
-
           "Future Index Long": 1,
-
           "Future Index Short": 1,
-
           _id: 0
-
         }
-
       })
-
       .sort({ Date: 1 })
-
       .toArray();
-
- 
 
     const niftyRows = await niftyColl
-
       .find({}, { projection: { Date: 1, Close: 1, _id: 0 } })
-
       .toArray();
-
- 
 
     const niftyMap: Record<string, number> = {};
 
     niftyRows.forEach(nifty => {
-
       const norm = dayjs(nifty.Date, "DD-MMM-YYYY").format("YYYY-MM-DD");
-
       niftyMap[norm] = Number(nifty.Close);
-
     });
 
- 
-
     const manualPrevNetOI = 40514;
-
     let prevNetOI = manualPrevNetOI;
-
- 
-
     const resultWithChange = rows.map(row => {
-
       const dateStr = row.Date;
-
       const currentNetOI =
-
         (row["Future Index Long"] || 0) - (row["Future Index Short"] || 0);
 
- 
-
       const change =
-
         dateStr === "2025-04-07"
-
           ? currentNetOI - manualPrevNetOI
-
           : currentNetOI - prevNetOI;
-
- 
 
       prevNetOI = currentNetOI;
 
- 
-
       return {
-
         Date: dateStr,
-
         Client_Index_Futures: change,
-
         NIFTY_Value: niftyMap[dateStr] ?? null,
-
       };
-
     });
-
- 
 
     res.json(resultWithChange);
-
   } catch (err) {
-
     console.error("Error in /api/Client_Index_Fut/data:", err);
-
     res.status(500).json({ error: "Internal Server Error" });
-
   }
-
 });
-
- 
 
 // Fetch Client Option Index OI & Nifty value
-
 app.get("/api/OIClient_Index_Opt/data", async (req, res) => {
-
   try {
-
     const nseColl = db.collection("nse");
-
     const niftyColl = db.collection("Nifty");
 
- 
-
     const rows = await nseColl
-
       .find({ "Client Type": "Client" }, {
-
         projection: {
-
           Date: 1,
-
           "Option Index Call Long": 1,
-
           "Option Index Call Short": 1,
-
           "Option Index Put Long": 1,
-
           "Option Index Put Short": 1,
-
           _id: 0
-
         }
-
       })
-
       .sort({ Date: 1 })
-
       .toArray();
-
- 
 
     const niftyRows = await niftyColl
-
       .find({}, { projection: { Date: 1, Close: 1, _id: 0 } })
-
       .toArray();
-
- 
 
     const niftyMap: Record<string, number> = {};
 
     niftyRows.forEach(nifty => {
-
       const norm = dayjs(nifty.Date, "DD-MMM-YYYY").format("YYYY-MM-DD");
-
       niftyMap[norm] = Number(nifty.Close);
-
     });
 
- 
-
     const result = rows.map(row => ({
-
       Date: row.Date,
-
       Client_Call_OI:
-
         (row["Option Index Call Long"] || 0) - (row["Option Index Call Short"] || 0),
-
       Client_Put_OI:
-
         (row["Option Index Put Long"] || 0) - (row["Option Index Put Short"] || 0),
-
       NIFTY_Value: niftyMap[row.Date] ?? null,
-
     }));
 
- 
-
     res.json(result);
-
   } catch (err) {
-
     console.error("Error in /api/OIClient_Index_Opt/data:", err);
-
     res.status(500).json({ error: "Internal Server Error" });
-
   }
-
 });
 
- 
 
 // Fetch Client Futures OI & Nifty value
-
 app.get("/api/OIClient_Index_Fut/data", async (req, res) => {
-
   try {
-
     const nseColl = db.collection("nse");
-
     const niftyColl = db.collection("Nifty");
 
- 
-
     const rows = await nseColl
-
       .find({ "Client Type": "Client" }, {
-
         projection: {
-
           Date: 1,
-
           "Future Index Long": 1,
-
           "Future Index Short": 1,
-
           _id: 0
-
         }
-
       })
-
       .sort({ Date: 1 })
-
       .toArray();
-
- 
 
     const niftyRows = await niftyColl
-
       .find({}, { projection: { Date: 1, Close: 1, _id: 0 } })
-
       .toArray();
-
- 
 
     const niftyMap: Record<string, number> = {};
 
     niftyRows.forEach(nifty => {
-
       const norm = dayjs(nifty.Date, "DD-MMM-YYYY").format("YYYY-MM-DD");
-
       niftyMap[norm] = Number(nifty.Close);
-
     });
 
- 
-
     const result = rows.map(row => ({
-
       Date: row.Date,
-
       Client_Futures_OI:
-
         (row["Future Index Long"] || 0) - (row["Future Index Short"] || 0),
-
       NIFTY_Value: niftyMap[row.Date] ?? null,
-
     }));
 
-   
-
     res.json(result);
-
   } catch (err) {
-
     console.error("Error in /api/OIClient_Index_Fut/data:", err);
-
     res.status(500).json({ error: "Internal Server Error" });
-
   }
-
 });
-
- 
 
 // Fetch all available distinct dates from NSE (excluding "TOTAL")
-
 app.get("/available-dates", async (req, res) => {
-
   try {
-
     const nseColl = db.collection("nse");
-
     const dates = await nseColl.distinct("Date", { "Client Type": { $ne: "TOTAL" } });
-
     dates.sort(); // Sort lexicographically (works for "YYYY-MM-DD")
-
     res.json(dates);
-
   } catch (err) {
-
     console.error("Error in /available-dates:", err);
-
     res.status(500).json({ error: "Internal Server Error" });
-
   }
-
 });
-
- 
 
 // Summary route: compare selectedDate vs previous available date (excluding "TOTAL")
 
@@ -2121,175 +1821,102 @@ app.get("/summary", (req: Request, res: Response): void => {
     });
 });
 
- 
-
 // Fetch combined market data (combined_market_chart2)
-
 app.get("/api/market-data", async (req, res) => {
-
   try {
-
     const coll = db.collection("combined_market_chart2");
-
     const rows = await coll.find({}).sort({ Date: 1 }).toArray();
-
     res.json(rows);
-
   } catch (err) {
-
     console.error("Error in /api/market-data:", err);
-
     res.status(500).send("Internal Server Error");
-
   }
-
 });
 
- 
-
 // Fetch merged Net OI data across FII/Client/Nifty/Cash
-
 app.get("/api/net-oi", async (req, res) => {
-
   try {
-
     const nseColl = db.collection("nse");
-
     const niftyColl = db.collection("Nifty");
-
     const cashColl = db.collection("cash_data_nse");
-
- 
-
     // Fetch all FII & Client rows
-
     const nseData = await nseColl
-
       .find({ "Client Type": { $in: ["FII", "Client"] } })
-
       .toArray();
-
- 
 
     // Fetch all Nifty rows
-
     const niftyData = await niftyColl.find({}).toArray();
 
- 
-
     // Fetch all cash data for FII/FPI * and DII **
-
     const cashData = await cashColl
-
       .find({ CATEGORY: { $in: ["FII/FPI *", "DII **"] } })
-
       .sort({ DATE: 1 }) // optional
-
       .toArray();
 
- 
-
     // const netOIMap = {};
-
     const netOIMap: Record<
-  string,
-  {
-    date: string;
-    FII_Index_Futures: number;
-    FII_Index_Options: number;
-    Client_Index_Futures: number;
-    Client_Index_Options: number;
-    Nifty_Close: number;
-    FII_Cash_Net: number;
-    DII_Cash_Net: number;
-  }
-> = {};
-
- 
+      string,
+      {
+        date: string;
+        FII_Index_Futures: number;
+        FII_Index_Options: number;
+        Client_Index_Futures: number;
+        Client_Index_Options: number;
+        Nifty_Close: number;
+        FII_Cash_Net: number;
+        DII_Cash_Net: number;
+      }
+    > = {};
 
     // Process NSE data (FII & Client)
-
     nseData.forEach(row => {
-
       // const date = normalizeDate(row["Date"], "nse");
-
       const raw = normalizeDate(row["Date"], "nse");
-if (!raw) return; // or `continue` if you’re in a `for`‌loop
-const date = raw;
-
+      if (!raw) return; // or `continue` if you’re in a `for`‌loop
+      const date = raw;
       const clientType = row["Client Type"];
 
- 
-
       if (!netOIMap[date]) {
-
         netOIMap[date] = {
-
           date,
-
           FII_Index_Futures: 0,
-
           FII_Index_Options: 0,
-
           Client_Index_Futures: 0,
-
           Client_Index_Options: 0,
-
           Nifty_Close: 0,
-
           FII_Cash_Net: 0,
-
           DII_Cash_Net: 0
-
         };
-
       }
-
- 
 
       const indexFutures =
-
         (row["Future Index Long"] || 0) - (row["Future Index Short"] || 0);
-
       const indexOptions =
-
         ((row["Option Index Call Long"] || 0) - (row["Option Index Call Short"] || 0)) -
-
         ((row["Option Index Put Long"] || 0) - (row["Option Index Put Short"] || 0));
 
- 
-
       if (clientType === "FII") {
-
         netOIMap[date].FII_Index_Futures = indexFutures;
-
         netOIMap[date].FII_Index_Options = indexOptions;
-
       } else if (clientType === "Client") {
-
         netOIMap[date].Client_Index_Futures = indexFutures;
-
         netOIMap[date].Client_Index_Options = indexOptions;
-
       }
-
     });
 
- 
+
 
     // Process Nifty data
 
-     niftyData.forEach(row => {
-        const raw = normalizeDate(row["Date"], "nifty");
-        if (!raw) return;
-        const date = raw;
-        if (netOIMap[date]) {
-          netOIMap[date].Nifty_Close = Number(row["Close"] || 0);
-        }
-      });
+    niftyData.forEach(row => {
+      const raw = normalizeDate(row["Date"], "nifty");
+      if (!raw) return;
+      const date = raw;
+      if (netOIMap[date]) {
+        netOIMap[date].Nifty_Close = Number(row["Close"] || 0);
+      }
+    });
 
-    
- 
     cashData.forEach(row => {
       const raw = normalizeDate(row["DATE"], "cash");
       if (!raw) return;
@@ -2302,32 +1929,19 @@ const date = raw;
         }
       }
     });
- 
 
     // Convert map to sorted array by actual date
-
     const mergedData = Object.values(netOIMap).sort((a, b) => {
-
       return (
-
         dayjs(a.date, "DD-MM-YYYY").toDate() - dayjs(b.date, "DD-MM-YYYY").toDate()
-
       );
-
     });
 
- 
-
     res.json(mergedData);
-
   } catch (err) {
-
     console.error("Error in /api/net-oi:", err);
-
     res.status(500).send("Internal Server Error");
-
   }
-
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -2360,31 +1974,32 @@ io.on('connection', (socket) => {
     console.log(`Client disconnected (${socket.id}):`, reason);
   });
 
-  socket.on('error', (err) => {   
+  socket.on('error', (err) => {
     console.error('Socket error:', err);
   });
 });
-
-const PORT = Number(process.env.PORT) || 8000;
-const HOST = process.env.HOST || '0.0.0.0';
-
-httpServer.listen(PORT,
-  HOST,
-  () => {
-    console.log(`🚀 Server running at http://${HOST}:${PORT}`);
-    console.log(`🔗 Allowed CORS origin: ${process.env.CLIENT_URL || 'http://localhost:5173'}`);
-  });
 
 
 // const PORT = Number(process.env.PORT) || 8000;
 // const HOST = process.env.HOST || '0.0.0.0';
 
 // httpServer.listen(PORT,
+//   HOST,
+//   () => {
+//     console.log(`🚀 Server running at http://${HOST}:${PORT}`);
+//     console.log(`🔗 Allowed CORS origin: ${process.env.CLIENT_URL || 'http://localhost:5173'}`);
+//   });
+
+
+const PORT = Number(process.env.PORT) || 8000;
+// const HOST = process.env.HOST || '0.0.0.0';
+
+httpServer.listen(PORT,
   // HOST,
-  // () => {
+  () => {
     // console.log(`🚀 Server running at http://${HOST}:${PORT}`);
-    // console.log(`🔗 Allowed CORS origin: ${process.env.CLIENT_URL || 'http://localhost:5173'}`);
-  // });
+    console.log(`🔗 Allowed CORS origin: ${process.env.CLIENT_URL || 'http://localhost:5173'}`);
+  });
 
 // Graceful shutdown
 process.on('SIGINT', async () => {

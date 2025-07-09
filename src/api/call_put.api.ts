@@ -19,7 +19,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
       let dataEnd = todayEnd;
   
       let docs = await collection.find({
-        security_id: 56785,
+        security_id: 53216,
         timestamp: { $gte: todayStart, $lt: todayEnd }
       }, { projection: { _id: 0, LTP: 1, timestamp: 1 } })
         .sort({ timestamp: 1 })
@@ -27,7 +27,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
   
       // Step 2: If today is empty, fallback to latest available data date
       if (docs.length === 0) {
-        const lastEntry = await collection.find({ security_id: 56785 })
+        const lastEntry = await collection.find({ security_id: 53216 })
           .sort({ timestamp: -1 })
           .limit(1)
           .toArray();
@@ -46,7 +46,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
         dataEnd = lastEnd;
   
         docs = await collection.find({
-          security_id: 56785,
+          security_id: 53216,
           timestamp: { $gte: lastDate, $lt: lastEnd }
         }, { projection: { _id: 0, LTP: 1, timestamp: 1 } })
           .sort({ timestamp: 1 })
@@ -78,18 +78,23 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
           const [optionData, optionData2] = await Promise.all([
             collection.findOne({
               strike_price: atmStrike,
-              trading_symbol: { $regex: '^NIFTY-Jun2025' },
+              expiry_flag:"W",
+              // security_id : 40051,
+              trading_symbol: { $regex: '^NIFTY-Jul2025' },
               option_type: "CE",
               timestamp: { $gte: windowStart, $lt: windowEnd }
             }, { sort: { timestamp: -1 } }),
             collection.findOne({
               strike_price: atmStrike,
-              trading_symbol: { $regex: '^NIFTY-Jun2025' },
+              expiry_flag:"W",
+              // security_id : 40057,
+              trading_symbol: { $regex: '^NIFTY-Jul2025' },
               option_type: "PE",
               timestamp: { $gte: windowStart, $lt: windowEnd }
             }, { sort: { timestamp: -1 } }),
           ]);
   
+          
           results.push({
             atmStrike,
             niftyLTP: ltp,
@@ -110,7 +115,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
     }
   });
 
-  app.get('/api/nifty/near5', async (_req, res) => {
+  app.get('/api/nifty/near5', async (req, res) => {
     try {
       const collection = db.collection('all_nse_fno');
   
@@ -122,7 +127,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
   
       // --- Step 2: Try to fetch today’s latest NIFTY LTP ---
       let latestNifty = await collection.find({
-        security_id: 56785,
+        security_id: 53216,
         timestamp: { $gte: todayStart, $lt: todayEnd }
       })
         .sort({ timestamp: -1 })
@@ -134,7 +139,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
       let dataEnd = todayEnd;
   
       if (!latestNifty.length || !latestNifty[0].LTP) {
-        const lastAvailable = await collection.find({ security_id: 56785 })
+        const lastAvailable = await collection.find({ security_id: 53216 })
           .sort({ timestamp: -1 })
           .limit(1)
           .toArray();
@@ -153,7 +158,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
         dataEnd = lastEnd;
   
         latestNifty = await collection.find({
-          security_id: 56785,
+          security_id: 53216,
           timestamp: { $gte: dataStart, $lt: dataEnd }
         }).sort({ timestamp: -1 }).limit(1).toArray();
   
@@ -174,15 +179,17 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
         strikePrices.map(async (strike) => {
           const CE_docs = await collection.find({
             strike_price: strike,
+            expiry_flag:"W",
             option_type: "CE",
-            trading_symbol: { $regex: '^NIFTY-Jun2025' },
+            trading_symbol: { $regex: '^NIFTY-Jul2025' },
             timestamp: { $gte: dataStart, $lt: dataEnd }
           }).toArray();
   
           const PE_docs = await collection.find({
             strike_price: strike,
+            expiry_flag:"W",
             option_type: "PE",
-            trading_symbol: { $regex: '^NIFTY-Jun2025' },
+            trading_symbol: { $regex: '^NIFTY-Jul2025' },
             timestamp: { $gte: dataStart, $lt: dataEnd }
           }).toArray();
   
@@ -211,7 +218,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
       // --- Step 6: Fetch Nifty LTP timeline for the same date ---
       const niftyDocs = await collection
         .find({
-          security_id: 56785,
+          security_id: 53216,
           timestamp: { $gte: dataStart, $lt: dataEnd }
         }, { projection: { _id: 0, LTP: 1, timestamp: 1 } })
         .sort({ timestamp: 1 })
@@ -233,8 +240,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
     }
   });
 
-
-  app.get('/api/nifty/overall', async (_req, res) => {
+  app.get('/api/nifty/overall', async (req, res) => {
     try {
       const collection = db.collection('all_nse_fno');
   
@@ -246,7 +252,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
   
       // Step 2: Try fetching latest NIFTY from today
       let latestNifty = await collection.find({
-        security_id: 56785,
+        security_id: 53216,
         timestamp: { $gte: todayStart, $lt: todayEnd }
       }).sort({ timestamp: -1 }).limit(1).toArray();
   
@@ -255,7 +261,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
   
       // Step 3: If no LTP today, find most recent available date
       if (!latestNifty.length || !latestNifty[0].LTP) {
-        const lastAvailable = await collection.find({ security_id: 56785 })
+        const lastAvailable = await collection.find({ security_id: 53216 })
           .sort({ timestamp: -1 })
           .limit(1)
           .toArray();
@@ -274,7 +280,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
         dataEnd = lastEnd;
   
         latestNifty = await collection.find({
-          security_id: 56785,
+          security_id: 53216,
           timestamp: { $gte: lastStart, $lt: lastEnd }
         }).sort({ timestamp: -1 }).limit(1).toArray();
   
@@ -294,15 +300,17 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
         strikePrices.map(async (strike) => {
           const CE_docs = await collection.find({
             strike_price: strike,
+            expiry_flag:"W",
             option_type: "CE",
-            trading_symbol: { $regex: '^NIFTY-Jun2025' },
+            trading_symbol: { $regex: '^NIFTY-Jul2025' },
             timestamp: { $gte: dataStart, $lt: dataEnd }
           }).toArray();
   
           const PE_docs = await collection.find({
             strike_price: strike,
+            expiry_flag:"W",
             option_type: "PE",
-            trading_symbol: { $regex: '^NIFTY-Jun2025' },
+            trading_symbol: { $regex: '^NIFTY-Jul2025' },
             timestamp: { $gte: dataStart, $lt: dataEnd }
           }).toArray();
   
@@ -330,7 +338,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
   
       // Step 6: Fetch NIFTY LTP timeline
       const niftyDocs = await collection.find({
-        security_id: 56785,
+        security_id: 53216,
         timestamp: { $gte: dataStart, $lt: dataEnd }
       }, {
         projection: { _id: 0, LTP: 1, timestamp: 1 }

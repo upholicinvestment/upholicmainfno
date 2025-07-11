@@ -68,8 +68,6 @@ connectDB();
 app.use('/api', routes);
 
 // ✅ API: Fetch selected stocks with LTP and volume
-// Express + MongoDB API Route to serve latest stock data
-
 app.get('/api/stocks', async (_req, res) => {
   try {
     const securityIds = [
@@ -78,15 +76,18 @@ app.get('/api/stocks', async (_req, res) => {
       53354, 53450, 53466, 53317, 53301, 53480, 53226, 53432, 53352, 53433,
       53241, 53300, 53327, 53258, 53253, 53471, 53398, 53441, 53425, 53369,
       53341, 53250, 53395, 53324, 53316, 53318, 53279, 53245, 53280, 53452
-    ];
+    ]; // Only BEL for now
 
     const stocks = await db.collection('nse_fno_stock').aggregate([
-      { $match: { security_id: { $in: securityIds } } },
-      { $sort: { timestamp: -1 } },
+      { $match: { 
+        security_id: { $in: securityIds },
+        type: "Full Data" // Only include Full Data entries
+      }},
+      { $sort: { received_at: -1 } }, // Sort by most recent first
       {
         $group: {
           _id: '$security_id',
-          doc: { $first: '$$ROOT' }
+          doc: { $first: '$$ROOT' } // Get the most recent document for each security
         }
       },
       { $replaceRoot: { newRoot: '$doc' } },
@@ -94,11 +95,11 @@ app.get('/api/stocks', async (_req, res) => {
         $project: {
           _id: 0,
           security_id: 1,
-          LTP: 1,
+          LTP: { $toString: '$LTP' },
           volume: 1,
-          open: 1,
-          close: 1,
-          timestamp: 1
+          open: { $toString: '$open' },
+          close: { $toString: '$close' },
+          received_at: 1
         }
       }
     ]).toArray();
@@ -109,6 +110,7 @@ app.get('/api/stocks', async (_req, res) => {
     res.status(500).json({ error: 'Failed to fetch stocks' });
   }
 });
+
 
 app.get('/api/advdec', async (req: Request, res: Response): Promise<void> => {
   try {

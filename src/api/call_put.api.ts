@@ -15,6 +15,8 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
       timestamp: { $gte: dataStart, $lt: dataEnd }
     }).sort({ timestamp: 1 }).toArray();
 
+    console.log(`Fetched ${docs.length} documents for strike ${strike}`);
+
     const groupedByTimestamp: { [key: string]: any } = {};
     let lastCallOI: number | null = null;
     let lastPutOI: number | null = null;
@@ -36,6 +38,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
       }
     }
 
+    console.log(`Processed ${Object.keys(groupedByTimestamp).length} timestamps for strike ${strike}`);
     return Object.values(groupedByTimestamp);
   }
 
@@ -44,6 +47,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
   // -----------------------
   app.get('/api/nifty/atm-strikes-timeline', async (req, res) => {
     try {
+      console.log('\n=== Processing ATM Strikes Timeline Request ===');
       const intervalParam = req.query.interval as string || '3';
       const interval = parseInt(intervalParam, 10);
       const collection = db.collection('all_nse_fno');
@@ -54,6 +58,8 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
       const todayEnd = new Date(todayStart);
       todayEnd.setUTCDate(todayEnd.getUTCDate() + 1);
 
+      console.log(`Fetching NIFTY data for today (${todayStart.toISOString()} to ${todayEnd.toISOString()})`);
+
       let docs = await collection.find({
         security_id: 53216,
         timestamp: { $gte: todayStart, $lt: todayEnd }
@@ -61,10 +67,15 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
         .sort({ timestamp: 1 })
         .toArray();
 
+      console.log(`Found ${docs.length} NIFTY records for today`);
+
       if (!docs.length) {
+        console.log('No data for today, checking last available date...');
         const lastEntry = await collection.find({ security_id: 53216 })
           .sort({ timestamp: -1 }).limit(1).toArray();
+        
         if (!lastEntry.length) {
+          console.log('No NIFTY data found in database');
           res.status(404).json({ error: 'No NIFTY data found' });
           return;
         }
@@ -74,6 +85,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
         const lastEnd = new Date(lastDate);
         lastEnd.setUTCDate(lastEnd.getUTCDate() + 1);
 
+        console.log(`Fetching data for last available date: ${lastDate.toISOString()}`);
         docs = await collection.find({
           security_id: 53216,
           timestamp: { $gte: lastDate, $lt: lastEnd }
@@ -84,6 +96,8 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
 
       const results = [];
       const intervalMap: Record<string, boolean> = {};
+
+      console.log(`Processing ${docs.length} records with ${interval} minute intervals`);
 
       for (const doc of docs) {
         const ts = new Date(doc.timestamp);
@@ -97,6 +111,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
           intervalMap[roundedISO] = true;
 
           const atmStrike = Math.round(ltp / 50) * 50;
+          console.log(`Processing interval ${roundedISO} with ATM strike ${atmStrike}`);
 
           const windowStart = new Date(rounded);
           windowStart.setMinutes(windowStart.getMinutes() - interval);
@@ -120,7 +135,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
             }, { sort: { timestamp: -1 } }),
           ]);
 
-          results.push({
+          const resultItem = {
             atmStrike,
             niftyLTP: ltp,
             timestamp: roundedISO,
@@ -128,10 +143,14 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
             putOI: optionDataPE?.OI ?? null,
             callTimestamp: optionDataCE?.timestamp ?? null,
             putTimestamp: optionDataPE?.timestamp ?? null
-          });
+          };
+
+          console.log(`Interval result: ${JSON.stringify(resultItem)}`);
+          results.push(resultItem);
         }
       }
 
+      console.log(`Returning ${results.length} data points`);
       res.json({ atmStrikes: results });
     } catch (error) {
       console.error('Error fetching ATM strikes timeline:', error);
@@ -144,11 +163,14 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
   // -----------------------
   app.get('/api/nifty/near5', async (req, res) => {
     try {
+      console.log('\n=== Processing NEAR5 Request ===');
       const collection = db.collection('all_nse_fno');
       const now = new Date();
       const todayStart = new Date(now.setUTCHours(0, 0, 0, 0));
       const todayEnd = new Date(todayStart);
       todayEnd.setUTCDate(todayEnd.getUTCDate() + 1);
+
+      console.log(`Looking for latest NIFTY data for today (${todayStart.toISOString()})`);
 
       let latestNifty = await collection.find({
         security_id: 53216,
@@ -159,12 +181,16 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
       let dataEnd = todayEnd;
 
       if (!latestNifty.length || !latestNifty[0].LTP) {
+        console.log('No data for today, checking last available date...');
         const lastAvailable = await collection.find({ security_id: 53216 })
           .sort({ timestamp: -1 }).limit(1).toArray();
+        
         if (!lastAvailable.length) {
+          console.log('No historical Nifty LTP found');
           res.status(404).json({ error: 'No historical Nifty LTP found' });
           return;
         }
+        
         const lastDate = new Date(lastAvailable[0].timestamp);
         const lastStart = new Date(Date.UTC(lastDate.getUTCFullYear(), lastDate.getUTCMonth(), lastDate.getUTCDate()));
         const lastEnd = new Date(lastStart);
@@ -173,6 +199,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
         dataStart = lastStart;
         dataEnd = lastEnd;
 
+        console.log(`Using data from ${lastStart.toISOString()} to ${lastEnd.toISOString()}`);
         latestNifty = await collection.find({
           security_id: 53216,
           timestamp: { $gte: dataStart, $lt: dataEnd }
@@ -183,9 +210,14 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
       const atmStrike = Math.round(niftyLTP / 50) * 50;
       const strikePrices = Array.from({ length: 11 }, (_, i) => atmStrike - 250 + i * 50);
 
+      console.log(`NIFTY LTP: ${niftyLTP}, ATM Strike: ${atmStrike}`);
+      console.log(`Fetching OI for strikes: ${strikePrices.join(', ')}`);
+
       const results = (await Promise.all(
         strikePrices.map(strike => getOIForStrike(collection, strike, dataStart, dataEnd))
       )).flat();
+
+      console.log(`Fetched ${results.length} OI records`);
 
       const niftyDocs = await collection.find({
         security_id: 53216,
@@ -196,6 +228,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
       const nifty = niftyDocs.map(doc => ({ value: doc.LTP, timestamp: doc.timestamp }));
       const dateUsed = dataStart.toISOString().split('T')[0];
 
+      console.log(`Returning data for date: ${dateUsed}`);
       res.json({ atmStrike, overall: results, nifty, dateUsed });
     } catch (error) {
       console.error('Error fetching NEAR5:', error);
@@ -208,11 +241,14 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
   // -----------------------
   app.get('/api/nifty/overall', async (req, res) => {
     try {
+      console.log('\n=== Processing OVERALL Request ===');
       const collection = db.collection('all_nse_fno');
       const now = new Date();
       const todayStart = new Date(now.setUTCHours(0, 0, 0, 0));
       const todayEnd = new Date(todayStart);
       todayEnd.setUTCDate(todayEnd.getUTCDate() + 1);
+
+      console.log(`Looking for latest NIFTY data for today (${todayStart.toISOString()})`);
 
       let latestNifty = await collection.find({
         security_id: 53216,
@@ -223,12 +259,16 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
       let dataEnd = todayEnd;
 
       if (!latestNifty.length || !latestNifty[0].LTP) {
+        console.log('No data for today, checking last available date...');
         const lastAvailable = await collection.find({ security_id: 53216 })
           .sort({ timestamp: -1 }).limit(1).toArray();
+        
         if (!lastAvailable.length) {
+          console.log('No NIFTY LTP data available');
           res.status(404).json({ error: 'No NIFTY LTP data available' });
           return;
         }
+        
         const lastDate = new Date(lastAvailable[0].timestamp);
         const lastStart = new Date(Date.UTC(lastDate.getUTCFullYear(), lastDate.getUTCMonth(), lastDate.getUTCDate()));
         const lastEnd = new Date(lastStart);
@@ -237,6 +277,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
         dataStart = lastStart;
         dataEnd = lastEnd;
 
+        console.log(`Using data from ${lastStart.toISOString()} to ${lastEnd.toISOString()}`);
         latestNifty = await collection.find({
           security_id: 53216,
           timestamp: { $gte: dataStart, $lt: dataEnd }
@@ -247,9 +288,14 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
       const atmStrike = Math.round(niftyLTP / 50) * 50;
       const strikePrices = Array.from({ length: 21 }, (_, i) => atmStrike - 500 + i * 50);
 
+      console.log(`NIFTY LTP: ${niftyLTP}, ATM Strike: ${atmStrike}`);
+      console.log(`Fetching OI for strikes: ${strikePrices.join(', ')}`);
+
       const results = (await Promise.all(
         strikePrices.map(strike => getOIForStrike(collection, strike, dataStart, dataEnd))
       )).flat();
+
+      console.log(`Fetched ${results.length} OI records`);
 
       const niftyDocs = await collection.find({
         security_id: 53216,
@@ -260,6 +306,7 @@ export default function registerNiftyRoutes(app: Express, db: Db) {
       const nifty = niftyDocs.map(doc => ({ value: doc.LTP, timestamp: doc.timestamp }));
       const dateUsed = dataStart.toISOString().split('T')[0];
 
+      console.log(`Returning data for date: ${dateUsed}`);
       res.json({ atmStrike, overall: results, nifty, dateUsed });
     } catch (error) {
       console.error('Error fetching OVERALL:', error);

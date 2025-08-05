@@ -16,7 +16,7 @@ import { errorMiddleware } from "./middleware/error.middleware";
 import { setDatabase } from "./controllers/auth.controller";
 
 import AnalysisRoutes from "./api/analysis.api";
-import registerNiftyRoutes from "./api/call_put.api";
+import registerNiftyRoutes from "./api/call_put";
 import cash_dataRoutes from "./api/cash data.api";
 import ClientRoutes from "./api/client.api";
 import DIIRoutes from "./api/dii.api";

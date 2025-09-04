@@ -63,11 +63,11 @@ async function sendOtpSMS(phone: string, otp: string) {
 
   if (!API_KEY) {
     console.warn("[SMS] SMS_API_KEY missing. Skipping provider call.");
-    console.log(`[DEV SMS] ${number}: ${text}`);
+    // console.log(`[DEV SMS] ${number}: ${text}`);
     return;
   }
   if (IS_DEV || FORCE_LOG_OTP) {
-    console.log(`[DEV SMS] ${number}: ${text}`);
+    // console.log(`[DEV SMS] ${number}: ${text}`);
   }
 
   try {
@@ -85,7 +85,7 @@ async function sendOtpSMS(phone: string, otp: string) {
     const url = `https://www.smsgatewayhub.com/api/mt/SendSMS?${qs.toString()}`;
     const resp = await fetch(url, { method: "GET" });
     const body = await resp.text();
-    console.log("[SMS Response]", resp.status, body);
+    // console.log("[SMS Response]", resp.status, body);
 
     if (!resp.ok) {
       console.error("[SMS ERROR] Non-200 status returned by provider.");
@@ -99,7 +99,7 @@ async function sendOtpSMS(phone: string, otp: string) {
 async function sendOtpEmail(email: string, otp: string) {
   const text = `Your password reset OTP is ${otp}. It expires in 10 minutes.`;
   if (IS_DEV || FORCE_LOG_OTP) {
-    console.log(`[DEV EMAIL] ${email}: ${text}`);
+    // console.log(`[DEV EMAIL] ${email}: ${text}`);
   }
   // TODO: integrate email provider if you want email delivery
 }
@@ -385,11 +385,11 @@ export const login = async (req: Request, res: Response): Promise<void> => {
 
     const token = generateToken((user as any)._id.toString());
 
-    console.log(
-      "[auth.login] JWT issued for user",
-      (user as any)._id.toString(),
-      token
-    );
+    // console.log(
+    //   "[auth.login] JWT issued for user",
+    //   (user as any)._id.toString(),
+    //   token
+    // );
 
     res.status(200).json({
       token,

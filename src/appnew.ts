@@ -243,16 +243,16 @@ io.on("connection", (socket) => {
   // console.log("🔌 New client connected:", socket.id);
   socket.on("disconnect", (reason) =>
     console.log(`Client disconnected (${socket.id}):`, reason)
-  );
+);
   // socket.on("error", (err) => console.error("Socket error:", err));
 });
 
 // Graceful shutdown
 process.on("SIGINT", async () => {
-  console.log("🛑 Shutting down gracefully...");
+  // console.log("🛑 Shutting down gracefully...");
   await mongoClient.close();
   httpServer.close(() => {
-    console.log("✅ Server closed");
+    // console.log("✅ Server closed");
     process.exit(0);
   });
 });

@@ -20,13 +20,13 @@ export class DhanSocket {
 
   constructor(private token: string, private clientId: string) {
     this.wsUrl = `wss://api-feed.dhan.co?version=2&token=${this.token}&clientId=${this.clientId}&authType=2`;
-    console.log("WS URL:", this.wsUrl);
+    // console.log("WS URL:", this.wsUrl);
   }
 
   public async connect(securityIds: number[]) {
     this.securityIds = securityIds;
     this.cleanup();
-    console.log(`🔗 Connecting to Dhan WebSocket: ${this.wsUrl}`);
+    // console.log(`🔗 Connecting to Dhan WebSocket: ${this.wsUrl}`);
     this.ws = new WebSocket(this.wsUrl);
     this.setupEventHandlers();
   }
@@ -35,7 +35,7 @@ export class DhanSocket {
     if (!this.ws) return;
 
     this.ws.on("open", () => {
-      console.log("✅ Connected to Dhan WebSocket");
+      // console.log("✅ Connected to Dhan WebSocket");
       this.isConnected = true;
       this.reconnectAttempts = 0;
       this.setupPing();
@@ -63,7 +63,7 @@ export class DhanSocket {
 
         if (feedCode === 2) {
           const ltp = buf.readFloatLE(8);
-          console.log(`💹 [Ticker] SecID=${secId} LTP=${ltp}`);
+          // console.log(`💹 [Ticker] SecID=${secId} LTP=${ltp}`);
           saveLTP({ securityId: secId, LTP: ltp });
         }
       }
@@ -86,7 +86,7 @@ export class DhanSocket {
         })),
       };
       this.ws.send(JSON.stringify(payload));
-      console.log(`📡 Sent subscription batch:`, batch);
+      // console.log(`📡 Sent subscription batch:`, batch);
     }
   }
 
@@ -103,7 +103,7 @@ export class DhanSocket {
     this.cleanup();
     if (this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       this.reconnectAttempts++;
-      console.log(`♻ Reconnecting attempt ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}...`);
+      // console.log(`♻ Reconnecting attempt ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}...`);
       this.reconnectTimeout = setTimeout(() => this.connect(this.securityIds), RECONNECT_INTERVAL);
     } else {
       console.error("❌ Max reconnection attempts reached.");

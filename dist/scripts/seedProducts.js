@@ -26,10 +26,10 @@ const oidFrom = (ns) => {
     }
     const client = new mongodb_1.MongoClient(uri);
     try {
-        console.log("⏳ Connecting to MongoDB…", uri);
+        // console.log("⏳ Connecting to MongoDB…", uri);
         await client.connect();
         const db = client.db(dbName);
-        console.log(`✅ Connected to MongoDB (${db.databaseName})`);
+        // console.log(`✅ Connected to MongoDB (${db.databaseName})`);
         // ===== Canonical product list with STABLE _id =====
         const P = (key) => oidFrom(`product:${key}`);
         const V = (productKey, variantKey) => oidFrom(`variant:${productKey}:${variantKey}`);
@@ -43,8 +43,8 @@ const oidFrom = (ns) => {
                 hasVariants: false,
                 forSale: true,
                 route: "/dashboard",
-                priceMonthly: Number(process.env.BUNDLE_MONTHLY_PRICE ?? 1),
-                priceYearly: Number(process.env.BUNDLE_YEARLY_PRICE ?? 2),
+                priceMonthly: Number(process.env.BUNDLE_MONTHLY_PRICE ?? 499), //499
+                priceYearly: Number(process.env.BUNDLE_YEARLY_PRICE ?? 4999), //4999
                 components: [
                     // "technical_scanner",
                     // "fundamental_scanner",
@@ -84,7 +84,7 @@ const oidFrom = (ns) => {
             {
                 _id: P("journaling"),
                 key: "journaling",
-                name: "Journaling",
+                name: "TradeKhata",
                 isActive: true,
                 hasVariants: false,
                 forSale: false,
@@ -109,17 +109,17 @@ const oidFrom = (ns) => {
                 forSale: true,
                 route: "/dashboard",
             },
-            // Journaling (Solo) → monthly + yearly
+            // TradeKhata → monthly + yearly
             {
                 _id: P("journaling_solo"),
                 key: "journaling_solo",
-                name: "Journaling (Solo)",
+                name: "TradeKhata",
                 isActive: true,
                 hasVariants: false,
                 forSale: true,
                 route: "/journal",
-                priceMonthly: Number(process.env.JOURNALING_SOLO_MONTHLY_PRICE ?? 1),
-                priceYearly: Number(process.env.JOURNALING_SOLO_YEARLY_PRICE ?? 2),
+                priceMonthly: Number(process.env.JOURNALING_SOLO_MONTHLY_PRICE ?? 299), //299
+                priceYearly: Number(process.env.JOURNALING_SOLO_YEARLY_PRICE ?? 2499), //2499
             },
         ];
         // Upsert products by _id (stable)
@@ -142,7 +142,7 @@ const oidFrom = (ns) => {
                 key: "starter",
                 name: "Starter Scalping",
                 description: "Beginner-friendly scalping suite",
-                priceMonthly: 1,
+                priceMonthly: 5999, //5999
                 interval: "monthly",
                 isActive: true,
             },
@@ -152,7 +152,7 @@ const oidFrom = (ns) => {
                 key: "pro",
                 name: "Option Scalper PRO",
                 description: "Advanced option scalping engine",
-                priceMonthly: 1,
+                priceMonthly: 14999, //14999
                 interval: "monthly",
                 isActive: true,
             },
@@ -160,9 +160,9 @@ const oidFrom = (ns) => {
                 _id: V("algo_simulator", "swing"),
                 productId: algoId,
                 key: "swing",
-                name: "Swing Trader Master",
-                description: "Swing trading strategy system",
-                priceMonthly: 1,
+                name: "Sniper Algo",
+                description: "Sniper trading strategy system",
+                priceMonthly: 9999, //9999
                 interval: "monthly",
                 isActive: true,
             },

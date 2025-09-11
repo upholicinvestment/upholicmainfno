@@ -30,7 +30,7 @@ export const saveLTP = async (data: any) => {
     };
 
     await db.collection("ltp_history").insertOne(ltpDoc);
-    // console.log("✅ Saved LTP to DB:", ltpDoc);
+    console.log("✅ Saved LTP to DB:", ltpDoc);
   } catch (err) {
     console.error("❌ Error saving LTP data:", err);
   }

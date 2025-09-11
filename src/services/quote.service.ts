@@ -43,7 +43,7 @@ export const fetchMarketQuote = async (ids: number[]): Promise<Record<string, an
     );
 
     const data = response?.data?.data?.NSE_FNO || {};
-    // console.log(`📡 Quote Response: ${Object.keys(data).length} items fetched.`);
+    console.log(`📡 Quote Response: ${Object.keys(data).length} items fetched.`);
     return data;
   } catch (err: any) {
     if (err.response?.status === 429) {
@@ -111,7 +111,7 @@ export const saveMarketQuote = async (data: Record<string, any>) => {
 
     if (documents.length > 0) {
       const result = await db.collection("market_quotes").insertMany(documents);
-      // console.log(`💾 Saved ${result.insertedCount} Market Quote docs at ${timestamp.toLocaleString("en-IN")}.`);
+      console.log(`💾 Saved ${result.insertedCount} Market Quote docs at ${timestamp.toLocaleString("en-IN")}.`);
     }
   } catch (err) {
     console.error("❌ Error saving Market Quote:", err);
@@ -123,7 +123,7 @@ export const saveMarketQuote = async (data: Record<string, any>) => {
  */
 export const fetchAndStoreInstruments = async () => {
   try {
-    // console.log("📡 Fetching instrument master from Dhan...");
+    console.log("📡 Fetching instrument master from Dhan...");
     const response = await axios.get(
       "https://images.dhan.co/api-data/api-scrip-master-detailed.csv",
       { responseType: "stream" }
@@ -154,7 +154,7 @@ export const fetchAndStoreInstruments = async () => {
     await db.collection("instruments").deleteMany({});
     await db.collection("instruments").insertMany(instruments);
 
-    // console.log(`💾 Saved ${instruments.length} instruments to DB.`);
+    console.log(`💾 Saved ${instruments.length} instruments to DB.`);
   } catch (err) {
     console.error("❌ Error fetching/storing instruments:", err);
   }

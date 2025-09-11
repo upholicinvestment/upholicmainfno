@@ -16,7 +16,7 @@ exports.setInstrumentDatabase = setInstrumentDatabase;
  */
 const fetchAndStoreInstruments = async () => {
     try {
-        console.log("📡 Fetching instrument master from Dhan...");
+        // console.log("📡 Fetching instrument master from Dhan...");
         const response = await axios_1.default.get("https://images.dhan.co/api-data/api-scrip-master-detailed.csv", { responseType: "stream" });
         const dataStream = response.data;
         const instruments = [];
@@ -41,7 +41,7 @@ const fetchAndStoreInstruments = async () => {
             throw new Error("Database not initialized");
         await db.collection("instruments").deleteMany({});
         await db.collection("instruments").insertMany(instruments);
-        console.log(`💾 Saved ${instruments.length} instruments to DB.`);
+        // console.log(`💾 Saved ${instruments.length} instruments to DB.`);
     }
     catch (err) {
         console.error("❌ Error fetching/storing instruments:", err);

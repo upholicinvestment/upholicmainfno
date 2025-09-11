@@ -27,7 +27,7 @@ const sendSms = async (phone, message) => {
             let responseData = '';
             res.on('data', (chunk) => (responseData += chunk));
             res.on('end', () => {
-                console.log('📩 SMS API Response:', responseData); // Debug log
+                // console.log('📩 SMS API Response:', responseData); // Debug log
                 const lower = responseData.toLowerCase();
                 if (lower.includes('invalid') ||
                     lower.includes('error') ||

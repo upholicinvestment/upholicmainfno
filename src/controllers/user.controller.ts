@@ -21,12 +21,7 @@ const toObjectId = (id: string | ObjectId): ObjectId => {
   return new ObjectId(id);
 };
 
-/** Resolve userId from multiple sources:
- * 1) req.user.id (if auth middleware sets it)
- * 2) Authorization: Bearer <JWT> (shared with your other controllers)
- * 3) X-User-Id header (DEV helper)
- * 4) ?userId=<ObjectId> (DEV helper)
- */
+/** Resolve userId from multiple sources */
 const getUserIdFromReq = (req: Request): ObjectId | null => {
   const u = (req as any).user;
   if (u?.id) {
@@ -39,9 +34,7 @@ const getUserIdFromReq = (req: Request): ObjectId | null => {
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET) as { id?: string };
       if (decoded?.id) return toObjectId(decoded.id);
-    } catch {
-      /* invalid token -> fall through */
-    }
+    } catch { /* invalid token -> fall through */ }
   }
 
   const hdrUserId = req.header("X-User-Id");
@@ -55,6 +48,23 @@ const getUserIdFromReq = (req: Request): ObjectId | null => {
   }
 
   return null;
+};
+
+/** ---------- Avatars (frontend maps keys -> images in src/assets/avatars) ---------- */
+export const AVATAR_KEYS = [
+  "sienna",
+  "analyst",
+  "rose",
+  "comet",
+  "crimson",
+  "prime",
+
+] as const;
+type AvatarKey = typeof AVATAR_KEYS[number];
+
+/** GET /api/users/me/avatar-options */
+export const getAvatarOptions: RequestHandler = async (_req, res) => {
+  res.json({ avatars: AVATAR_KEYS });
 };
 
 /** GET /api/users/me */
@@ -84,7 +94,12 @@ export const getProfile: RequestHandler = async (req, res) => {
   }
 };
 
-/** PUT /api/users/me  body: { name?: string, email?: string } */
+/** PUT /api/users/me
+ * Accepts:
+ * name?, email?, phone?, bio?, broker?, location?, avatarKey?
+ * tradingStyle?, experienceYears?, riskProfile?, instruments?, timezone?
+ * notifyAnnouncements?, notifyOrderAlerts?, notifyRenewals?, twoFactorEnabled?
+ */
 export const updateProfile: RequestHandler = async (req, res) => {
   try {
     const userId = getUserIdFromReq(req);
@@ -93,8 +108,28 @@ export const updateProfile: RequestHandler = async (req, res) => {
       return;
     }
 
-    const { name, email } = (req.body ?? {}) as { name?: string; email?: string };
-    if (!name && !email) {
+    const body = (req.body ?? {}) as {
+      name?: string;
+      email?: string;
+      phone?: string;
+      bio?: string;
+      broker?: string;
+      location?: string;
+      avatarKey?: AvatarKey;
+
+      tradingStyle?: string;
+      experienceYears?: string;
+      riskProfile?: string;
+      instruments?: string[];
+      timezone?: string;
+
+      notifyAnnouncements?: boolean;
+      notifyOrderAlerts?: boolean;
+      notifyRenewals?: boolean;
+      twoFactorEnabled?: boolean;
+    };
+
+    if (!Object.keys(body).length) {
       res.status(400).json({ message: "Nothing to update" });
       return;
     }
@@ -106,23 +141,45 @@ export const updateProfile: RequestHandler = async (req, res) => {
       return;
     }
 
-    if (email && email !== (existing as any).email) {
-      const dup = await _db.collection("users").findOne({ email });
+    if (body.email && body.email !== (existing as any).email) {
+      const dup = await _db.collection("users").findOne({ email: body.email });
       if (dup) {
         res.status(400).json({ message: "Email already in use" });
         return;
       }
     }
 
+    if (body.avatarKey && !AVATAR_KEYS.includes(body.avatarKey)) {
+      res.status(400).json({ message: "Invalid avatarKey" });
+      return;
+    }
+
     const $set: Record<string, any> = { updatedAt: new Date() };
-    if (name) $set.name = name;
-    if (email) $set.email = email;
+
+    if (typeof body.name === "string") $set.name = body.name;
+    if (typeof body.email === "string") $set.email = body.email;
+    if (typeof body.phone === "string") $set.phone = body.phone;
+    if (typeof body.bio === "string") $set.bio = body.bio;
+    if (typeof body.broker === "string") $set.broker = body.broker;
+    if (typeof body.location === "string") $set.location = body.location;
+    if (typeof body.avatarKey === "string") $set.avatarKey = body.avatarKey;
+
+    if (typeof body.tradingStyle === "string") $set.tradingStyle = body.tradingStyle;
+    if (typeof body.experienceYears === "string") $set.experienceYears = body.experienceYears;
+    if (typeof body.riskProfile === "string") $set.riskProfile = body.riskProfile;
+    if (Array.isArray(body.instruments)) $set.instruments = body.instruments;
+    if (typeof body.timezone === "string") $set.timezone = body.timezone;
+
+    if (typeof body.notifyAnnouncements === "boolean") $set.notifyAnnouncements = body.notifyAnnouncements;
+    if (typeof body.notifyOrderAlerts === "boolean") $set.notifyOrderAlerts = body.notifyOrderAlerts;
+    if (typeof body.notifyRenewals === "boolean") $set.notifyRenewals = body.notifyRenewals;
+    if (typeof body.twoFactorEnabled === "boolean") $set.twoFactorEnabled = body.twoFactorEnabled;
 
     await _db.collection("users").updateOne({ _id: userId }, { $set });
-    const fresh = await _db.collection("users").findOne(
-      { _id: userId },
-      { projection: { password: 0 } }
-    );
+
+    const fresh = await _db
+      .collection("users")
+      .findOne({ _id: userId }, { projection: { password: 0 } });
 
     res.json(fresh);
   } catch (err) {
@@ -131,10 +188,36 @@ export const updateProfile: RequestHandler = async (req, res) => {
   }
 };
 
+/** Shape returned by /users/me/products */
+type OutVariant = {
+  variantId: ObjectId;
+  key: string;       // starter | pro | swing
+  name: string;
+  priceMonthly?: number | null;
+  interval?: string | null;
+};
+type OutItem = {
+  productId: ObjectId;
+  key: string;
+  name: string;
+  route: string;
+  hasVariants: boolean;
+  forSale: boolean;
+  status: string;
+  startedAt: Date | null;
+  endsAt: Date | null;
+  meta?: any;
+  /** Back-compat: first variant (if any) */
+  variant: OutVariant | null;
+  /** NEW: all owned variants for this product */
+  variants?: OutVariant[];
+};
+
 /** GET /api/users/me/products
  * Returns active entitlements (status=active and (endsAt null or future)).
  * - DOES NOT filter by forSale (so bundle components like 'journaling' are returned)
  * - Hides 'journaling_solo' if 'journaling' (bundle component) exists
+ * - Groups multiple entitlements of the same product into ONE item with variants[]
  * - Accepts ?debug=1 to include raw entitlements for troubleshooting
  */
 export const getMyProducts: RequestHandler = async (req, res) => {
@@ -149,7 +232,7 @@ export const getMyProducts: RequestHandler = async (req, res) => {
     const _db = requireDb();
     const now = new Date();
 
-    // 1) Fetch all active entitlements for the user
+    // 1) All active entitlements
     const entitlements = await _db
       .collection("user_products")
       .find({
@@ -173,7 +256,7 @@ export const getMyProducts: RequestHandler = async (req, res) => {
       return;
     }
 
-    // 2) Load product documents for all productIds (NO forSale filter!)
+    // 2) Products (active only), no forSale filter
     const productIds = Array.from(
       new Set(entitlements.map((e: any) => (e.productId as ObjectId).toString()))
     ).map((s) => new ObjectId(s));
@@ -187,7 +270,7 @@ export const getMyProducts: RequestHandler = async (req, res) => {
     const productMap = new Map<string, any>();
     products.forEach((p: any) => productMap.set((p._id as ObjectId).toString(), p));
 
-    // 3) Load variant docs (if any)
+    // 3) Variants
     const variantIds = Array.from(
       new Set(
         entitlements
@@ -197,7 +280,7 @@ export const getMyProducts: RequestHandler = async (req, res) => {
       )
     ).map((s) => new ObjectId(s));
 
-    let variantMap = new Map<string, any>();
+    const variantMap = new Map<string, any>();
     if (variantIds.length) {
       const variants = await _db
         .collection("product_variants")
@@ -208,89 +291,101 @@ export const getMyProducts: RequestHandler = async (req, res) => {
       variants.forEach((v: any) => variantMap.set((v._id as ObjectId).toString(), v));
     }
 
-    // 4) Build items
-    const rawItems = entitlements
-      .map((e: any) => {
-        const pid = (e.productId as ObjectId).toString();
-        const vid = e.variantId ? (e.variantId as ObjectId).toString() : null;
-        const p = productMap.get(pid);
-        if (!p) return null; // product might be inactive/removed
+    // 4) Group by productId → collect ALL variants
+    const grouped = new Map<string, OutItem & { _variantSet?: Set<string> }>();
 
-        const v = vid ? variantMap.get(vid) : null;
+    for (const e of entitlements) {
+      const pid = (e.productId as ObjectId).toString();
+      const prod = productMap.get(pid);
+      if (!prod) continue; // product might be inactive/removed
 
+      const baseKey = (prod.key as string) || "";
+      const existing = grouped.get(pid);
+
+      const mkOutVariant = (): OutVariant | null => {
+        if (!e.variantId) return null;
+        const vid = (e.variantId as ObjectId).toString();
+        const v = variantMap.get(vid);
+        if (!v) return null;
         return {
-          productId: p._id,
-          key: p.key as string,
-          name: p.name as string,
-          route: p.route as string,
-          hasVariants: !!p.hasVariants,
-          forSale: !!p.forSale,
+          variantId: v._id,
+          key: String(v.key || "").toLowerCase(),
+          name: v.name as string,
+          priceMonthly: v.priceMonthly ?? null,
+          interval: v.interval ?? null,
+        };
+      };
+
+      if (!existing) {
+        const firstVariant = mkOutVariant();
+        const set = new Set<string>();
+        if (firstVariant) set.add((firstVariant.variantId as ObjectId).toString());
+
+        grouped.set(pid, {
+          productId: prod._id,
+          key: baseKey,
+          name: prod.name as string,
+          route: prod.route as string,
+          hasVariants: !!prod.hasVariants,
+          forSale: !!prod.forSale,
           status: e.status as string,
           startedAt: e.startedAt ?? null,
           endsAt: e.endsAt ?? null,
           meta: e.meta ?? null,
-          variant: v
-            ? {
-                variantId: v._id,
-                key: v.key as string,
-                name: v.name as string,
-                priceMonthly: v.priceMonthly ?? null,
-                interval: v.interval ?? null,
-              }
-            : null,
-        };
-      })
-      .filter(Boolean) as Array<{
-        key: string;
-        name: string;
-        route: string;
-        hasVariants: boolean;
-        forSale: boolean;
-        status: string;
-        startedAt: Date | null;
-        endsAt: Date | null;
-        meta: any;
-        variant: any;
-        productId: ObjectId;
-      }>;
-
-    if (!rawItems.length) {
-      res.json({ items: [], ...(debug ? { debug: { entitlements, products } } : {}) });
-      return;
-    }
-
-    // 5) Hide Journaling (Solo) if Journaling (bundle component) exists
-    const hasBundleJournaling = rawItems.some((it) => it.key === "journaling");
-    const items = hasBundleJournaling
-      ? rawItems.filter((it) => it.key !== "journaling_solo")
-      : rawItems;
-
-    // 6) If there are accidental duplicates, keep the one with the latest endsAt
-    const latestByKey = new Map<string, any>();
-    for (const it of items) {
-      const prev = latestByKey.get(it.key);
-      if (!prev) {
-        latestByKey.set(it.key, it);
+          variant: firstVariant || null,        // back-compat
+          variants: firstVariant ? [firstVariant] : [], // NEW: begin list
+          _variantSet: set,
+        });
       } else {
-        const prevEnds = prev.endsAt ? new Date(prev.endsAt).getTime() : 0;
-        const currEnds = it.endsAt ? new Date(it.endsAt).getTime() : 0;
-        if (currEnds >= prevEnds) latestByKey.set(it.key, it);
+        // merge date range/status; keep earliest start & latest end
+        const prevStart = existing.startedAt ? new Date(existing.startedAt).getTime() : Infinity;
+        const currStart = e.startedAt ? new Date(e.startedAt).getTime() : Infinity;
+        existing.startedAt = isFinite(prevStart) && isFinite(currStart)
+          ? new Date(Math.min(prevStart, currStart))
+          : (existing.startedAt || (e.startedAt ?? null));
+
+        const prevEnd = existing.endsAt ? new Date(existing.endsAt).getTime() : 0;
+        const currEnd = e.endsAt ? new Date(e.endsAt).getTime() : 0;
+        if (currEnd > prevEnd) existing.endsAt = e.endsAt ?? existing.endsAt;
+
+        // collect variant if present (de-dup by variantId)
+        const ov = mkOutVariant();
+        if (ov) {
+          const vidStr = (ov.variantId as ObjectId).toString();
+          if (!existing._variantSet!.has(vidStr)) {
+            existing._variantSet!.add(vidStr);
+            (existing.variants as OutVariant[]).push(ov);
+          }
+          // keep a stable "variant" for back-compat (first)
+          if (!existing.variant) existing.variant = ov;
+        }
       }
     }
 
-    const finalItems = Array.from(latestByKey.values()).sort((a, b) =>
-      String(a.name).localeCompare(String(b.name))
-    );
+    // 5) Convert to array
+    let items: OutItem[] = Array.from(grouped.values()).map((x) => {
+      const { _variantSet, ...rest } = x;
+      return rest;
+    });
+
+    // 6) Hide Journaling (Solo) if Journaling (bundle component) exists
+    const hasBundleJournaling = items.some((it) => it.key === "journaling");
+    if (hasBundleJournaling) {
+      items = items.filter((it) => it.key !== "journaling_solo");
+    }
+
+    // 7) Sort by name for stability
+    items.sort((a, b) => String(a.name).localeCompare(String(b.name)));
 
     res.json({
-      items: finalItems,
+      items,
       ...(debug
         ? {
             debug: {
               entitlements,
               productIds,
               hasBundleJournaling,
-              keptKeys: finalItems.map((x) => x.key),
+              keptKeys: items.map((x) => x.key),
             },
           }
         : {}),

@@ -90,13 +90,13 @@ function getISTTimestamp() {
     return now;
 }
 const url = `wss://api-feed.dhan.co?version=2&token=${process.env.DHAN_API_KEY}&clientId=${process.env.DHAN_CLIENT_ID}&authType=2`;
-console.log("Connecting to:", url);
+// console.log("Connecting to:", url);
 const ws = new ws_1.default(url);
 // Connect to MongoDB when starting the application
 async function connectToDatabase() {
     try {
         await mongoClient.connect();
-        console.log("✅ Connected to MongoDB!");
+        // console.log("✅ Connected to MongoDB!");
     }
     catch (err) {
         console.error("❌ MongoDB connection error:", err);
@@ -104,7 +104,7 @@ async function connectToDatabase() {
 }
 connectToDatabase();
 ws.on("open", () => {
-    console.log("✅ Connected! Subscribing to LTP feed...");
+    // console.log("✅ Connected! Subscribing to LTP feed...");
     subscribeTicker(securityIds);
     startQuotePolling();
 });
@@ -128,7 +128,7 @@ function subscribeTicker(ids) {
             })),
         };
         ws.send(JSON.stringify(payload));
-        console.log("📡 Subscribed WebSocket LTP batch:", batch);
+        // console.log("📡 Subscribed WebSocket LTP batch:", batch);
     }
 }
 // --------------------
@@ -148,7 +148,13 @@ async function startQuotePolling() {
                     },
                 });
                 const marketData = response?.data?.data?.[EXCHANGE_SEGMENT] || {};
-                console.log(JSON.stringify({ data: { [EXCHANGE_SEGMENT]: marketData }, status: "success" }, null, 2));
+                // console.log(
+                //     JSON.stringify(
+                //         { data: { [EXCHANGE_SEGMENT]: marketData }, status: "success" },
+                //         null,
+                //         2
+                //     )
+                // );
                 // Store the data in MongoDB
                 try {
                     if (Object.keys(marketData).length > 0) {
@@ -183,7 +189,7 @@ async function startQuotePolling() {
                             volume: data.volume
                         }));
                         await collection.insertMany(documents);
-                        console.log(`💾 Saved ${documents.length} documents for batch ${i}-${i + batch.length}`);
+                        // console.log(`💾 Saved ${documents.length} documents for batch ${i}-${i + batch.length}`);
                     }
                 }
                 catch (dbError) {
@@ -205,7 +211,7 @@ async function parseBinaryPacket(buffer) {
     switch (feedResponseCode) {
         case 2: {
             const ltp = buffer.readFloatLE(8);
-            console.log(`💹 [WS LTP] SecID=${securityId} LTP=${ltp}`);
+            // console.log(`💹 [WS LTP] SecID=${securityId} LTP=${ltp}`);
             // Store LTP data in MongoDB
             try {
                 await collection.updateOne({ security_id: securityId }, {
@@ -222,7 +228,7 @@ async function parseBinaryPacket(buffer) {
         }
         case 6: {
             const prevClose = buffer.readFloatLE(8);
-            console.log(`🔄 [PrevClose] SecID=${securityId} PrevClose=${prevClose}`);
+            // console.log(`🔄 [PrevClose] SecID=${securityId} PrevClose=${prevClose}`);
             // Store previous close data in MongoDB
             try {
                 await collection.updateOne({ security_id: securityId }, {
@@ -238,14 +244,14 @@ async function parseBinaryPacket(buffer) {
             break;
         }
         default:
-            console.log(`⚠ Unknown WS Packet Code=${feedResponseCode}`);
+        // console.log(`⚠ Unknown WS Packet Code=${feedResponseCode}`);
     }
 }
 // Handle graceful shutdown
 process.on('SIGINT', async () => {
     try {
         await mongoClient.close();
-        console.log('MongoDB connection closed');
+        // console.log('MongoDB connection closed');
         process.exit(0);
     }
     catch (err) {

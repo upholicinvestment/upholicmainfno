@@ -14,7 +14,7 @@ export const setInstrumentDatabase = (database: Db) => {
  */
 export const fetchAndStoreInstruments = async () => {
   try {
-    // console.log("📡 Fetching instrument master from Dhan...");
+    console.log("📡 Fetching instrument master from Dhan...");
     const response = await axios.get(
       "https://images.dhan.co/api-data/api-scrip-master-detailed.csv",
       { responseType: "stream" }
@@ -45,7 +45,7 @@ export const fetchAndStoreInstruments = async () => {
     await db.collection("instruments").deleteMany({});
     await db.collection("instruments").insertMany(instruments);
 
-    // console.log(`💾 Saved ${instruments.length} instruments to DB.`);
+    console.log(`💾 Saved ${instruments.length} instruments to DB.`);
   } catch (err) {
     console.error("❌ Error fetching/storing instruments:", err);
   }

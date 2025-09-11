@@ -6,7 +6,7 @@ export function Stocks(app: Express, db: Db) {
   app.get("/api/stocks", async (_req: Request, res: Response) => {
     try {
       const securityIds = [
-        65226, 64452, 65035, 65231, 64904, 65124, 64390, 64405, 64220, 64229
+        3506, 5258, 21808, 1964, 10999, 4306, 20374, 910, 317, 10604
       ];
 
       const stocks = await db

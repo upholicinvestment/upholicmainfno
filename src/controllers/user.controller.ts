@@ -21,8 +21,8 @@ const toObjectId = (id: string | ObjectId): ObjectId => {
   return new ObjectId(id);
 };
 
-/** Resolve userId from multiple sources */
-const getUserIdFromReq = (req: Request): ObjectId | null => {
+/** ---------- Exported: Resolve userId from multiple sources ---------- */
+export const getUserIdFromReq = (req: Request): ObjectId | null => {
   const u = (req as any).user;
   if (u?.id) {
     try { return toObjectId(u.id); } catch { /* ignore */ }
@@ -58,7 +58,6 @@ export const AVATAR_KEYS = [
   "comet",
   "crimson",
   "prime",
-
 ] as const;
 type AvatarKey = typeof AVATAR_KEYS[number];
 
@@ -94,12 +93,7 @@ export const getProfile: RequestHandler = async (req, res) => {
   }
 };
 
-/** PUT /api/users/me
- * Accepts:
- * name?, email?, phone?, bio?, broker?, location?, avatarKey?
- * tradingStyle?, experienceYears?, riskProfile?, instruments?, timezone?
- * notifyAnnouncements?, notifyOrderAlerts?, notifyRenewals?, twoFactorEnabled?
- */
+/** PUT /api/users/me */
 export const updateProfile: RequestHandler = async (req, res) => {
   try {
     const userId = getUserIdFromReq(req);
@@ -116,13 +110,11 @@ export const updateProfile: RequestHandler = async (req, res) => {
       broker?: string;
       location?: string;
       avatarKey?: AvatarKey;
-
       tradingStyle?: string;
       experienceYears?: string;
       riskProfile?: string;
       instruments?: string[];
       timezone?: string;
-
       notifyAnnouncements?: boolean;
       notifyOrderAlerts?: boolean;
       notifyRenewals?: boolean;
@@ -188,10 +180,9 @@ export const updateProfile: RequestHandler = async (req, res) => {
   }
 };
 
-/** Shape returned by /users/me/products */
 type OutVariant = {
   variantId: ObjectId;
-  key: string;       // starter | pro | swing
+  key: string;
   name: string;
   priceMonthly?: number | null;
   interval?: string | null;
@@ -207,19 +198,10 @@ type OutItem = {
   startedAt: Date | null;
   endsAt: Date | null;
   meta?: any;
-  /** Back-compat: first variant (if any) */
   variant: OutVariant | null;
-  /** NEW: all owned variants for this product */
   variants?: OutVariant[];
 };
 
-/** GET /api/users/me/products
- * Returns active entitlements (status=active and (endsAt null or future)).
- * - DOES NOT filter by forSale (so bundle components like 'journaling' are returned)
- * - Hides 'journaling_solo' if 'journaling' (bundle component) exists
- * - Groups multiple entitlements of the same product into ONE item with variants[]
- * - Accepts ?debug=1 to include raw entitlements for troubleshooting
- */
 export const getMyProducts: RequestHandler = async (req, res) => {
   try {
     const userId = getUserIdFromReq(req);
@@ -232,7 +214,6 @@ export const getMyProducts: RequestHandler = async (req, res) => {
     const _db = requireDb();
     const now = new Date();
 
-    // 1) All active entitlements
     const entitlements = await _db
       .collection("user_products")
       .find({
@@ -256,7 +237,6 @@ export const getMyProducts: RequestHandler = async (req, res) => {
       return;
     }
 
-    // 2) Products (active only), no forSale filter
     const productIds = Array.from(
       new Set(entitlements.map((e: any) => (e.productId as ObjectId).toString()))
     ).map((s) => new ObjectId(s));
@@ -270,7 +250,6 @@ export const getMyProducts: RequestHandler = async (req, res) => {
     const productMap = new Map<string, any>();
     products.forEach((p: any) => productMap.set((p._id as ObjectId).toString(), p));
 
-    // 3) Variants
     const variantIds = Array.from(
       new Set(
         entitlements
@@ -291,13 +270,12 @@ export const getMyProducts: RequestHandler = async (req, res) => {
       variants.forEach((v: any) => variantMap.set((v._id as ObjectId).toString(), v));
     }
 
-    // 4) Group by productId → collect ALL variants
     const grouped = new Map<string, OutItem & { _variantSet?: Set<string> }>();
 
     for (const e of entitlements) {
       const pid = (e.productId as ObjectId).toString();
       const prod = productMap.get(pid);
-      if (!prod) continue; // product might be inactive/removed
+      if (!prod) continue;
 
       const baseKey = (prod.key as string) || "";
       const existing = grouped.get(pid);
@@ -332,12 +310,11 @@ export const getMyProducts: RequestHandler = async (req, res) => {
           startedAt: e.startedAt ?? null,
           endsAt: e.endsAt ?? null,
           meta: e.meta ?? null,
-          variant: firstVariant || null,        // back-compat
-          variants: firstVariant ? [firstVariant] : [], // NEW: begin list
+          variant: firstVariant || null,
+          variants: firstVariant ? [firstVariant] : [],
           _variantSet: set,
         });
       } else {
-        // merge date range/status; keep earliest start & latest end
         const prevStart = existing.startedAt ? new Date(existing.startedAt).getTime() : Infinity;
         const currStart = e.startedAt ? new Date(e.startedAt).getTime() : Infinity;
         existing.startedAt = isFinite(prevStart) && isFinite(currStart)
@@ -348,7 +325,6 @@ export const getMyProducts: RequestHandler = async (req, res) => {
         const currEnd = e.endsAt ? new Date(e.endsAt).getTime() : 0;
         if (currEnd > prevEnd) existing.endsAt = e.endsAt ?? existing.endsAt;
 
-        // collect variant if present (de-dup by variantId)
         const ov = mkOutVariant();
         if (ov) {
           const vidStr = (ov.variantId as ObjectId).toString();
@@ -356,25 +332,21 @@ export const getMyProducts: RequestHandler = async (req, res) => {
             existing._variantSet!.add(vidStr);
             (existing.variants as OutVariant[]).push(ov);
           }
-          // keep a stable "variant" for back-compat (first)
           if (!existing.variant) existing.variant = ov;
         }
       }
     }
 
-    // 5) Convert to array
     let items: OutItem[] = Array.from(grouped.values()).map((x) => {
       const { _variantSet, ...rest } = x;
       return rest;
     });
 
-    // 6) Hide Journaling (Solo) if Journaling (bundle component) exists
     const hasBundleJournaling = items.some((it) => it.key === "journaling");
     if (hasBundleJournaling) {
       items = items.filter((it) => it.key !== "journaling_solo");
     }
 
-    // 7) Sort by name for stability
     items.sort((a, b) => String(a.name).localeCompare(String(b.name)));
 
     res.json({

@@ -1,7 +1,13 @@
-// server/src/middleware/auth.middleware.ts
 import { RequestHandler } from "express";
 import jwt from "jsonwebtoken";
-import { User } from "../models/user.model";
+import type { Db, ObjectId } from "mongodb";
+import { ObjectId as _ObjectId } from "mongodb";
+
+// optional DB handle (native driver). We'll inject it from appnew.ts
+let authDb: Db | null = null;
+export function setAuthDb(db: Db) {
+  authDb = db;
+}
 
 declare global {
   namespace Express {
@@ -14,10 +20,9 @@ declare global {
   }
 }
 
-export const authenticate: RequestHandler = async (req, res, next): Promise<void> => {
+export const authenticate: RequestHandler = async (req, res, next) => {
   if (process.env.PUBLIC_MODE === "true") {
-    next();
-    return;
+    return next();
   }
 
   let token: string | undefined;
@@ -31,15 +36,45 @@ export const authenticate: RequestHandler = async (req, res, next): Promise<void
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
-    const user = await User.findById(decoded.id).select("-password");
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
 
-    if (!user) {
-      res.status(401).json({ message: "No user found with this token" });
+    // Accept common shapes: { id }, {_id}, { userId }, nested { user: {...} }
+    const uid: string | undefined =
+      decoded?.id ??
+      decoded?._id ??
+      decoded?.userId ??
+      decoded?.user?.id ??
+      decoded?.user?._id ??
+      decoded?.user?.userId;
+
+    if (!uid) {
+      res.status(401).json({ message: "Not authorized, malformed token" });
       return;
     }
 
-    req.user = { id: user._id.toString(), role: user.role };
+    // role from token if present; default to "user"
+    let role: string = decoded?.role ?? decoded?.user?.role ?? "user";
+
+    // Try to enrich from DB if available (native driver)
+    if (authDb) {
+      try {
+        const _id = _ObjectId.isValid(uid) ? new _ObjectId(uid) : (uid as any as ObjectId);
+        const dbUser = await authDb.collection("users").findOne(
+          { _id },
+          { projection: { _id: 1, role: 1 } }
+        );
+
+        // If found, prefer DB role; otherwise continue with token defaults
+        if (dbUser) {
+          role = (dbUser as any).role || role;
+        }
+      } catch (e) {
+        // don't fail auth just because the lookup errored
+        // console.warn("Non-fatal user lookup error:", e);
+      }
+    }
+
+    req.user = { id: String(uid), role };
     next();
   } catch (err) {
     console.error("Authentication error:", err);
@@ -49,16 +84,11 @@ export const authenticate: RequestHandler = async (req, res, next): Promise<void
 
 export const authorize =
   (...roles: string[]): RequestHandler =>
-  (req, res, next): void => {
-    if (process.env.PUBLIC_MODE === "true") {
-      next();
-      return;
-    }
-
+  (req, res, next) => {
+    if (process.env.PUBLIC_MODE === "true") return next();
     if (!req.user || !roles.includes(req.user.role)) {
       res.status(403).json({ message: "Not authorized to access this route" });
       return;
     }
-
     next();
   };

@@ -1,4 +1,3 @@
-// server/src/appnew.ts
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -20,10 +19,11 @@ import {
 /* ---------- Core routes & middlewares ---------- */
 import routes from "./routes";
 import authRoutes from "./routes/auth.routes";
-import otpRoutes from "./routes/otp.routes";              // <-- mount PUBLIC
+import otpRoutes from "./routes/otp.routes";
 import { errorMiddleware } from "./middleware/error.middleware";
 import { setDatabase } from "./controllers/auth.controller";
 
+/* ---------- Public analytics/data APIs ---------- */
 import AnalysisRoutes from "./api/analysis.api";
 import registerNiftyRoutes from "./api/call_put";
 import cash_dataRoutes from "./api/cash data.api";
@@ -63,6 +63,9 @@ import { authenticate, setAuthDb } from "./middleware/auth.middleware";
 /* ---------- Journal indexes bootstrap ---------- */
 import { ensureCalendarIndexes } from "./services/snapshots";
 
+/* ---------- PUBLIC Orderbook bundle (summary/strategies) ---------- */
+import { Orderbook } from "./api/orderbook";
+
 dotenv.config();
 
 const app = express();
@@ -92,7 +95,11 @@ function isMarketOpen(): boolean {
   const totalMinutes = now.getHours() * 60 + now.getMinutes();
   return totalMinutes >= 9 * 60 + 15 && totalMinutes <= 15 * 60 + 30;
 }
-const securityIds = [35056, 35057, 35065, 35066, 35107, 35108, 35109, 35110, 35111, 35112, 35119, 35120];
+
+const securityIds = [
+  35056, 35057, 35065, 35066, 35107, 35108, 35109, 35110, 35111, 35112, 35119,
+  35120,
+];
 const QUOTE_BATCH_SIZE = 1000;
 const QUOTE_INTERVAL = 2500;
 
@@ -159,15 +166,25 @@ const connectDB = async () => {
     await ensureCalendarIndexes(db).catch(() => {});
 
     /* ================== PUBLIC routes (no JWT required) ================== */
-    app.use("/api/auth", authRoutes);         // login/register/refresh etc.
-    app.use("/api/otp", otpRoutes);           // <-- PUBLIC OTP endpoints
-    app.use("/api/products", productsRoutes); // <-- PUBLIC catalog fetch for Register page
-    app.use("/api/payments", paymentRoutes);  // <-- supports guest signupIntent create-order
+
+    // Auth / OTP / catalog / payments
+    app.use("/api/auth", authRoutes);
+    app.use("/api/otp", otpRoutes);
+    app.use("/api/products", productsRoutes);
+    app.use("/api/payments", paymentRoutes);
+
+    // Instruments & LTP
     app.use("/api/instruments", instrumentRouter);
     app.use("/api/ltp", ltpRoutes);
-    registerContactRoutes(app, db);
 
-    // Misc public analytics/data routes
+    // Contact & careers
+    registerContactRoutes(app, db);
+    app.use("/api/careers", registerCareersRoutes(db));
+
+    // PUBLIC Orderbook/summary/strategies endpoints (use X-User-Id)
+    Orderbook(app, db);
+
+    // Misc analytics/data (keep these public if desired)
     AnalysisRoutes(app, db);
     registerNiftyRoutes(app, db);
     cash_dataRoutes(app, db);
@@ -180,26 +197,25 @@ const connectDB = async () => {
     AdvDec(app, db);
     Heatmap(app, db);
 
-    /* ================== Auth gate: from here req.user is populated ================== */
+    /* ================== Auth gate: from here req.user is required ================== */
     app.use(authenticate);
 
-    /* ---- Entitlement-protected namespaces ---- */
+    /* ---- Entitlement-protected namespaces ----
+       DO NOT guard /api/summary here (the public one is already mounted). */
     app.use("/api/journal", requireEntitlement("journaling", "journaling_solo"));
     app.use("/api/daily-journal", requireEntitlement("journaling", "journaling_solo"));
 
+    // Guard your paid datasets
     app.use("/api/fii", requireEntitlement("fii_dii_data"));
     app.use("/api/dii", requireEntitlement("fii_dii_data"));
     app.use("/api/pro", requireEntitlement("fii_dii_data"));
-    app.use("/api/summary", requireEntitlement("fii_dii_data"));
     app.use("/api/main-fii-dii", requireEntitlement("fii_dii_data"));
 
-    /* ---- Authenticated routes (need req.user) ---- */
-    app.use("/api", registerTradeJournalRoutes(db));             // /upload-orderbook, /stats
+    /* ---- Authenticated routes ---- */
+    app.use("/api", registerTradeJournalRoutes(db));
     app.use("/api/daily-journal", registerDailyJournalRoutes(db));
-    app.use("/api/trade-calendar", registerTradeCalendarRoutes(db)); // calendar endpoints
+    app.use("/api/trade-calendar", registerTradeCalendarRoutes(db));
     app.use("/api/users", userRoutes);
-
-    // Central router (keep after authenticate if it relies on req.user)
     app.use("/api", routes);
 
     /* ================== Data boot + schedulers ================== */

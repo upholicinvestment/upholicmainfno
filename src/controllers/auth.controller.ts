@@ -52,56 +52,88 @@ function nextExpiry(
 }
 
 // ===== SMS (SMSGatewayHub) =====
-// Uses Node 18+ global fetch (no node-fetch needed)
-async function sendOtpSMS(phone: string, otp: string) {
-  const API_KEY = process.env.SMS_API_KEY;
-  const SENDER_ID = process.env.SMS_SENDER_ID || "UPOHTC"; // exactly 6 chars
-  const ROUTE_ID = process.env.SMS_ROUTE_ID || "1"; // you use 1
-  const number = normalizePhone(phone);
+function normalizePhoneForSMS(raw: string) {
+  const digits = String(raw || "").replace(/\D/g, "");
+  return digits.startsWith("91") ? digits : `91${digits}`;
+}
 
-  const text = `Dear Customer, your OTP for free call demo is ${otp}. Please use this to complete your registration. Do not share this OTP with anyone. - UpholicTech`;
+// Generic DLT sender
+async function sendDLTSMS(params: {
+  phone: string;
+  text: string;
+  dltTemplateId: string;
+}) {
+  const API_KEY = process.env.SMS_API_KEY;
+  const SENDER_ID = process.env.SMS_SENDER_ID || "UPOHTC"; // must be 6 chars
+  const ROUTE_ID = process.env.SMS_ROUTE_ID || "1";
+  const ENTITY_ID = process.env.SMS_DLT_ENTITY_ID || "1701174893649845477";
+
+  const DEBUG =
+    String(process.env.SMS_DEBUG_FORCE_LOG || "").toLowerCase() === "true";
 
   if (!API_KEY) {
     console.warn("[SMS] SMS_API_KEY missing. Skipping provider call.");
-    // console.log(`[DEV SMS] ${number}: ${text}`);
     return;
   }
-  if (IS_DEV || FORCE_LOG_OTP) {
-    // console.log(`[DEV SMS] ${number}: ${text}`);
+  if (SENDER_ID.length !== 6) {
+    console.warn("[SMS] SENDER_ID should be exactly 6 chars. Got:", SENDER_ID);
   }
 
-  try {
-    const qs = new URLSearchParams({
-      APIKey: API_KEY,
-      senderid: SENDER_ID,
-      channel: "2",
-      DCS: "0",
-      flashsms: "0",
+  const number = normalizePhoneForSMS(params.phone);
+
+  const qs = new URLSearchParams({
+    APIKey: API_KEY,
+    senderid: SENDER_ID,
+    channel: "2",
+    DCS: "0",
+    flashsms: "0",
+    number,
+    text: params.text,
+    route: ROUTE_ID,
+
+    // DLT fields (include common aliases)
+    dlttemplateid: params.dltTemplateId,
+    TemplateId: params.dltTemplateId,
+    EntityId: ENTITY_ID,
+  });
+
+  const url = `https://www.smsgatewayhub.com/api/mt/SendSMS?${qs.toString()}`;
+
+  if (DEBUG) {
+    const maskedKey =
+      API_KEY.length > 6 ? API_KEY.slice(0, 3) + "••••" + API_KEY.slice(-3) : "•••";
+    console.log("[SMS DEBUG]", {
+      url: url.replace(API_KEY, maskedKey),
       number,
-      text,
-      route: ROUTE_ID,
+      textPreview: params.text,
+      templateId: params.dltTemplateId,
+      entityId: ENTITY_ID,
     });
+  }
 
-    const url = `https://www.smsgatewayhub.com/api/mt/SendSMS?${qs.toString()}`;
-    const resp = await fetch(url, { method: "GET" });
-    const body = await resp.text();
-    // console.log("[SMS Response]", resp.status, body);
+  const resp = await fetch(url, { method: "GET" });
+  const body = await resp.text();
 
-    if (!resp.ok) {
-      console.error("[SMS ERROR] Non-200 status returned by provider.");
-    }
-  } catch (e) {
-    console.error("[SMS ERROR] Exception:", e);
+  if (DEBUG) console.log("[SMS Response]", resp.status, body);
+
+  if (!resp.ok || /invalid|error|fail|rejected|mismatch|not valid/i.test(body)) {
+    console.error("[SMS ERROR] Provider rejected or warned:", body);
   }
 }
 
-// Optional email channel (stub)
-async function sendOtpEmail(email: string, otp: string) {
-  const text = `Your password reset OTP is ${otp}. It expires in 10 minutes.`;
-  if (IS_DEV || FORCE_LOG_OTP) {
-    // console.log(`[DEV EMAIL] ${email}: ${text}`);
-  }
-  // TODO: integrate email provider if you want email delivery
+// ✅ Forgot Password SMS (uses its own DLT template)
+async function sendForgotPasswordOtpSMS(phone: string, otp: string) {
+  const FORGOT_TEMPLATE_ID =
+    process.env.SMS_DLT_TEMPLATE_ID_FORGOT || "1707175767044938979";
+
+  // EXACT DLT-approved text for Forgot Password
+  const text = `Dear Customer, your OTP for forget password is ${otp}. Please use this to complete your registration. Do not share this OTP with anyone. - UpholicTech`;
+
+  await sendDLTSMS({
+    phone,
+    text,
+    dltTemplateId: FORGOT_TEMPLATE_ID,
+  });
 }
 
 // ======================================================================
@@ -385,12 +417,6 @@ export const login = async (req: Request, res: Response): Promise<void> => {
 
     const token = generateToken((user as any)._id.toString());
 
-    // console.log(
-    //   "[auth.login] JWT issued for user",
-    //   (user as any)._id.toString(),
-    //   token
-    // );
-
     res.status(200).json({
       token,
       user: {
@@ -461,9 +487,14 @@ export const forgotPassword = async (
     });
 
     if ((user as any).phone) {
-      await sendOtpSMS((user as any).phone, otp);
+      await sendForgotPasswordOtpSMS((user as any).phone, otp);
     } else {
-      await sendOtpEmail((user as any).email, otp);
+      // Email (optional – align copy if you want)
+      const text = `Your password reset OTP is ${otp}. It expires in 10 minutes.`;
+      if (IS_DEV || FORCE_LOG_OTP) {
+        console.log("[DEV EMAIL] (forgot) text:", text);
+      }
+      // Integrate email provider here if desired
     }
 
     res.status(200).json({

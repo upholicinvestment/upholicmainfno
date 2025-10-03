@@ -1,4 +1,3 @@
-// src/api/contact.ts
 import type { Express, Request, Response, NextFunction, RequestHandler } from "express";
 import type { Db, WithId, Document } from "mongodb";
 
@@ -36,18 +35,32 @@ type ContactPayload = {
   lastName: string;
   email: string;
   company: string;   // mobile number
-  persona: string;   // product
+  persona: string;   // product (will be canonicalized)
   message: string;
   agree: boolean;
   website?: string;  // honeypot
 };
 
-const ALLOWED_PERSONAS = new Set([
-  "5-in-1 Trader's Essential Bundle",
+const ALLOWED_PERSONAS = new Set<string>([
+  "2-in-1 Trader's Essential Bundle",
   "ALGO Simulator",
   "Both / Not sure",
   "Select a product",
 ]);
+
+function canonicalizePersona(p: string) {
+  if (!p) return p;
+  let v = String(p)
+    .replace(/[\u2018\u2019\u2032]/g, "'") // smart -> straight apostrophe
+    .replace(/[\u2010-\u2015]/g, "-")      // any dash -> hyphen-minus
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (/^2\s*-?\s*in\s*-?\s*1\s+trader'?s?\s+essential\s+bundle$/i.test(v)) {
+    return "2-in-1 Trader's Essential Bundle";
+  }
+  return v;
+}
 
 function isEmail(x: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x);
@@ -56,17 +69,22 @@ function isPhoneLike(x: string) {
   const digits = (x || "").replace(/\D/g, "");
   return digits.length >= 8;
 }
-function validateBody(body: any): { ok: boolean; error?: string } {
+function validateBody(body: any): { ok: boolean; error?: string; personaCanonical?: string } {
   const b: ContactPayload = body || {};
   if (!b.firstName || typeof b.firstName !== "string") return { ok: false, error: "firstName is required" };
   if (!b.lastName || typeof b.lastName !== "string") return { ok: false, error: "lastName is required" };
   if (!b.email || !isEmail(b.email)) return { ok: false, error: "Valid email is required" };
   if (b.company && !isPhoneLike(b.company)) return { ok: false, error: "Mobile number looks invalid" };
-  if (!b.persona || !ALLOWED_PERSONAS.has(b.persona)) return { ok: false, error: "Please select a valid product" };
+
+  const personaCanonical = canonicalizePersona(b.persona || "");
+  if (!personaCanonical || !ALLOWED_PERSONAS.has(personaCanonical)) {
+    return { ok: false, error: "Please select a valid product" };
+  }
+
   if (typeof b.agree !== "boolean" || !b.agree) return { ok: false, error: "You must agree to Terms & Privacy" };
   if (typeof b.message !== "string") return { ok: false, error: "message must be a string" };
   if (b.website && b.website.trim().length > 0) return { ok: false, error: "Spam detected" };
-  return { ok: true };
+  return { ok: true, personaCanonical };
 }
 
 // ---- Index Helper (idempotent) ----
@@ -95,12 +113,14 @@ export default function registerContactRoutes(app: Express, db: Db) {
       }
 
       const payload: ContactPayload = req.body;
+      const personaCanonical = check.personaCanonical!;
+
       const doc = {
         firstName: payload.firstName.trim(),
         lastName: payload.lastName.trim(),
         email: payload.email.trim().toLowerCase(),
         mobile: (payload.company || "").trim(),
-        persona: payload.persona,
+        persona: personaCanonical, // store canonical enum value
         message: (payload.message || "").trim(),
         agree: !!payload.agree,
         createdAt: new Date(),
@@ -113,6 +133,7 @@ export default function registerContactRoutes(app: Express, db: Db) {
           })(),
           ua: req.headers["user-agent"] || null,
           referer: req.headers["referer"] || null,
+          personaLabel: typeof (req.body as any).personaLabel === "string" ? (req.body as any).personaLabel : null,
         },
       };
 

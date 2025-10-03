@@ -1,5 +1,6 @@
 import { Express, Request, Response, RequestHandler } from "express";
 import type { Db } from "mongodb";
+import { ObjectId } from "mongodb";
 
 /** ---------- Tiny in-memory cache (1.5s) ---------- */
 type CacheEntry = { expiresAt: number; payload: any };
@@ -1543,4 +1544,237 @@ export function Orderbook(app: Express, _db: Db) {
       }
     }) as RequestHandler
   );
+
+  // GET /api/strategies/trades
+// Query params:
+//  - strategy: optional, comma-separated names (e.g. "Sniper Algo, MeanReversion")
+//  - from, to: ISO strings (inclusive range check in code)
+//  - symbol: optional, uppercase symbol filter (exact match after we uppercase rows)
+//  - side: optional, BUY | SELL
+//  - flat: optional, "true" to return a flat array instead of grouped
+//  - limit, offset: optional pagination on the final array (default limit=1000, offset=0)
+
+app.get(
+  "/api/strategies/trades",
+  (async (req: Request, res: Response) => {
+    try {
+      const userId = getUserIdFromReq(req) || null;
+
+      // --- parse query ---
+      const strategyParam = (req.query.strategy ? String(req.query.strategy) : "").trim();
+      const strategies = strategyParam
+        ? strategyParam.split(",").map((s) => s.trim()).filter(Boolean)
+        : null;
+
+      const symbolFilter = (req.query.symbol ? String(req.query.symbol) : "").trim().toUpperCase();
+      const sideFilter = (req.query.side ? String(req.query.side) : "").trim().toUpperCase(); // BUY | SELL
+
+      const from = req.query.from ? new Date(String(req.query.from)) : undefined;
+      const to   = req.query.to   ? new Date(String(req.query.to))   : undefined;
+      const fromMs = from?.getTime();
+      const toMs   = to?.getTime();
+
+      const flat = String(req.query.flat || "").toLowerCase() === "true";
+      const limit  = Math.max(0, Math.min(Number(req.query.limit ?? 1000), 50_000));
+      const offset = Math.max(0, Number(req.query.offset ?? 0));
+
+      // --- collections ---
+      const tagsColl = _db.collection("tv_signal_tags");
+      const obColl   = _db.collection("orderbook_raw");
+
+      // --- find tags for requested strategies (or all if none specified) ---
+      const tagMatch: any = {};
+      if (strategies && strategies.length) {
+        tagMatch.strategyName = { $in: strategies };
+      }
+
+      const tagDocs = await tagsColl.find(tagMatch, {
+        projection: { _id: 0, orderTag: 1, strategyName: 1 },
+      }).toArray();
+
+      // if strategies were explicitly provided but none matched, early return
+      if ((strategies && strategies.length) && !tagDocs.length) {
+        return res.json({
+          ok: true,
+          from: from?.toISOString() ?? null,
+          to:   to?.toISOString()   ?? null,
+          data: [],
+        });
+      }
+
+      // build tag → strategy map
+      const tagToStrategy = new Map<string, string>();
+      for (const d of tagDocs) {
+        const ot = String(d.orderTag || "").trim();
+        const sn = String(d.strategyName || "").trim();
+        if (ot) tagToStrategy.set(ot, sn);
+      }
+
+      const allTags = Array.from(tagToStrategy.keys());
+      if (!allTags.length) {
+        return res.json({
+          ok: true,
+          from: from?.toISOString() ?? null,
+          to:   to?.toISOString()   ?? null,
+          data: [],
+        });
+      }
+
+      // --- pull orderbook rows by those tags & user ---
+      // (We still filter "complete" in-app, like your PnL route.)
+      const obRows = await obColl.find(
+        { userId, ordertag: { $in: allTags } },
+        {
+          projection: {
+            _id: 0,
+            ordertag: 1,
+            status: 1,
+            orderstatus: 1,
+            transactiontype: 1,
+            side: 1,
+            tradingsymbol: 1,
+            symbol: 1,
+            quantity: 1,
+            qty: 1,
+            filledshares: 1,
+            filledqty: 1,
+            averageprice: 1,
+            price: 1,
+            updatetime: 1,
+            exchorderupdatetime: 1,
+            exchtime: 1,
+            timestamp: 1,
+            createdAt: 1,
+          },
+        }
+      ).toArray();
+
+      type TradeEvt = {
+        id: string;               // composed id since orderbook_raw may not have one
+        strategyName: string;
+        symbol: string;
+        side: "BUY" | "SELL";
+        qty: number;
+        price: number;
+        t: number;                // epoch ms
+        tag: string;              // original ordertag
+      };
+
+      const events: TradeEvt[] = [];
+      for (const r of obRows) {
+        const status = String(r.status ?? r.orderstatus ?? "").toLowerCase();
+        if (!status.includes("complete")) continue;
+
+        const tag = String(r.ordertag ?? "");
+        const strat = tagToStrategy.get(tag);
+        if (!strat) continue;
+
+        const sideRaw = String(r.transactiontype ?? r.side ?? "").toUpperCase();
+        const side: "BUY" | "SELL" = sideRaw === "SELL" ? "SELL" : "BUY";
+
+        const qty = toNum(r.filledshares ?? r.filledqty ?? r.quantity ?? r.qty ?? 0);
+        const price = pickFillPrice(r);
+        if (!(qty > 0) || !(price > 0)) continue;
+
+        const t = parseObTime(
+          r.updatetime ??
+          r.exchorderupdatetime ??
+          r.exchtime ??
+          r.timestamp ??
+          r.createdAt
+        );
+        if (!t) continue;
+        if (fromMs && t < fromMs) continue;
+        if (toMs && t > toMs) continue;
+
+        const symbol = String(r.tradingsymbol ?? r.symbol ?? "").toUpperCase();
+        if (symbolFilter && symbol !== symbolFilter) continue;
+        if (sideFilter && (side !== "BUY" && side !== "SELL" || side !== sideFilter)) continue;
+
+        const id = `${symbol}|${t}|${side}|${qty}|${price}|${tag}`;
+        events.push({ id, strategyName: strat, symbol, side, qty, price, t, tag });
+      }
+
+      if (!events.length) {
+        return res.json({
+          ok: true,
+          from: from?.toISOString() ?? null,
+          to:   to?.toISOString()   ?? null,
+          data: [],
+        });
+      }
+
+      // optional strategy filter (post-map), in case tag table had wider mapping
+      const filtered = (strategies && strategies.length)
+        ? events.filter(e => strategies.includes(e.strategyName))
+        : events;
+
+      // sort newest first by default (you can change as needed)
+      filtered.sort((a, b) => b.t - a.t);
+
+      if (flat) {
+        const sliced = filtered.slice(offset, offset + limit);
+        return res.json({
+          ok: true,
+          from: from?.toISOString() ?? null,
+          to:   to?.toISOString()   ?? null,
+          count: filtered.length,
+          data: sliced,
+        });
+      }
+
+      // group by strategy
+      const byStrategy = new Map<string, TradeEvt[]>();
+      for (const e of filtered) {
+        if (!byStrategy.has(e.strategyName)) byStrategy.set(e.strategyName, []);
+        byStrategy.get(e.strategyName)!.push(e);
+      }
+
+      // apply paging after flattening groups, or page per group? Here we page the flattened order,
+      // then re-group just for the response shape so consumer gets “balanced” pages.
+      const flatAll = Array.from(byStrategy.values()).flat().sort((a,b)=>b.t-a.t);
+      const paged = flatAll.slice(offset, offset + limit);
+
+      const outMap = new Map<string, TradeEvt[]>();
+      for (const e of paged) {
+        const arr = outMap.get(e.strategyName) ?? [];
+        arr.push(e);
+        outMap.set(e.strategyName, arr);
+      }
+
+      const data = Array.from(outMap.entries()).map(([strategyName, trades]) => ({
+        strategyName,
+        trades,
+      }));
+
+      res.json({
+        ok: true,
+        from: from?.toISOString() ?? null,
+        to:   to?.toISOString()   ?? null,
+        count: filtered.length,
+        data,
+      });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e?.message || "Server error" });
+    }
+  }) as RequestHandler
+);
+
+app.get("/api/broker-configs/exists", async (req, res) => {
+  const userId = String(req.get("x-user-id") || req.query.userId || "").trim();
+  if (!userId) { res.status(400).json({ ok: false, error: "missing_user_id" }); return; }
+
+  const coll = _db.collection("broker_configs");
+  const match = ObjectId.isValid(userId)
+    ? { $or: [{ userId }, { userId: new ObjectId(userId) }] }
+    : { userId };
+
+  const docs = await coll.find(match, { projection: { _id: 0, brokerName: 1 } }).limit(50).toArray();
+  const hasBrokerConfig = docs.length > 0;
+  const brokers = Array.from(new Set(docs.map(d => String(d.brokerName || "").trim()).filter(Boolean)));
+
+  res.json({ ok: true, hasBrokerConfig, count: docs.length, brokers });
+  return;
+});
+
 }

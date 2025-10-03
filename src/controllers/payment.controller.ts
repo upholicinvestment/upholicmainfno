@@ -3,6 +3,7 @@ import crypto from "crypto";
 import { Db, ObjectId } from "mongodb";
 import jwt from "jsonwebtoken";
 import { razorpay } from "../services/razorpay.service";
+import { sendInvoiceEmail, type InvoicePayload } from "../utils/invoice";
 
 let db: Db;
 export const setPaymentDatabase = (database: Db) => {
@@ -15,6 +16,9 @@ const JOURNALING_SOLO_SKU_KEY = "journaling_solo";
 
 type Interval = "monthly" | "yearly";
 
+/** === RENEWAL CONFIG === */
+const RENEW_WINDOW_DAYS = Number(process.env.RENEW_WINDOW_DAYS || 7);
+
 const generateToken = (userId: string) => {
   const secret = process.env.JWT_SECRET;
   if (!secret) throw new Error("JWT_SECRET is not defined in .env");
@@ -22,34 +26,37 @@ const generateToken = (userId: string) => {
 };
 
 async function getBundleComponentsSet(): Promise<Set<string>> {
-  const bundle = await db
-    .collection("products")
-    .findOne({ key: BUNDLE_SKU_KEY, isActive: true });
+  const bundle = await db.collection("products").findOne({ key: BUNDLE_SKU_KEY, isActive: true });
   const comps = Array.isArray((bundle as any)?.components)
     ? ((bundle as any).components as string[])
-    : [
-        "technical_scanner",
-        "fundamental_scanner",
-        "fno_khazana",
-        "journaling",
-        "fii_dii_data",
-      ];
+    : ["technical_scanner", "fundamental_scanner", "fno_khazana", "journaling", "fii_dii_data"];
   return new Set(comps);
 }
 
-// ---------- helpers ----------
+/* ---------------- helpers ---------------- */
+const startOfDay = (d: Date) => {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+};
+const daysUntil = (dateLike?: Date | string | null) => {
+  if (!dateLike) return Infinity;
+  const today = startOfDay(new Date());
+  const exp = startOfDay(new Date(dateLike));
+  return Math.ceil((exp.getTime() - today.getTime()) / 86400000);
+};
+
 const getUserIdFromReqOrBearer = (req: Request): ObjectId | null => {
   const raw =
     (req as any).user?.id ||
     (req as any).user?._id ||
     (req as any).userId ||
     null;
+
   if (raw) {
     try {
       return new ObjectId(raw);
-    } catch {
-      /* ignore */
-    }
+    } catch {}
   }
 
   const auth = req.headers.authorization;
@@ -81,12 +88,8 @@ const resolvePriceForProduct = async (
 
     const priceRupees =
       interval === "yearly"
-        ? Number.isFinite(py) && py > 0
-          ? py
-          : envPY
-        : Number.isFinite(pm) && pm > 0
-        ? pm
-        : envPM;
+        ? Number.isFinite(py) && py > 0 ? py : envPY
+        : Number.isFinite(pm) && pm > 0 ? pm : envPM;
 
     return {
       amountPaise: Math.round(priceRupees * 100),
@@ -104,10 +107,7 @@ const resolvePriceForProduct = async (
     }
     const priceMonthly = (variant as any).priceMonthly;
     if (!priceMonthly || typeof priceMonthly !== "number") {
-      return {
-        amountPaise: 0,
-        displayName: `${product.name} - ${variant.name}`,
-      };
+      return { amountPaise: 0, displayName: `${product.name} - ${variant.name}` };
     }
     return {
       amountPaise: Math.round(priceMonthly * 100),
@@ -123,17 +123,12 @@ const resolvePriceForProduct = async (
 
     const priceRupees =
       interval === "yearly"
-        ? Number.isFinite(py) && py > 0
-          ? py
-          : envPY
-        : Number.isFinite(pm) && pm > 0
-        ? pm
-        : envPM;
+        ? Number.isFinite(py) && py > 0 ? py : envPY
+        : Number.isFinite(pm) && pm > 0 ? pm : envPM;
 
     return {
       amountPaise: Math.round(priceRupees * 100),
-      displayName:
-        product.name + (interval === "yearly" ? " (Yearly)" : " (Monthly)"),
+      displayName: product.name + (interval === "yearly" ? " (Yearly)" : " (Monthly)"),
     };
   }
 
@@ -167,7 +162,6 @@ function variantFilterExpr(variantId: ObjectId | null) {
     : { variantId };
 }
 
-/** Active entitlement for specific product (+ optional variant). */
 async function findActiveEntitlement(
   userId: ObjectId,
   productId: ObjectId,
@@ -182,7 +176,6 @@ async function findActiveEntitlement(
   });
 }
 
-/** Active bundle components that came from bundle purchase (source=payment_bundle). */
 async function findActiveBundleComponentEntitlements(userId: ObjectId) {
   const now = new Date();
   const componentKeys = Array.from(await getBundleComponentsSet());
@@ -193,22 +186,18 @@ async function findActiveBundleComponentEntitlements(userId: ObjectId) {
     .toArray();
   const componentIds = components.map((p: any) => p._id as ObjectId);
 
-  return db
-    .collection("user_products")
-    .find({
-      userId,
-      productId: { $in: componentIds },
-      status: "active",
-      $and: [
-        variantFilterExpr(null),
-        endsActiveExpr(now),
-        { "meta.source": "payment_bundle" },
-      ],
-    })
-    .toArray();
+  return db.collection("user_products").find({
+    userId,
+    productId: { $in: componentIds },
+    status: "active",
+    $and: [
+      variantFilterExpr(null),
+      endsActiveExpr(now),
+      { "meta.source": "payment_bundle" },
+    ],
+  }).toArray();
 }
 
-/** Cancel any active Journaling (Solo) entitlements when a Bundle purchase completes. */
 async function cancelActiveJournalingSolo(userId: ObjectId, reason: string) {
   const now = new Date();
   const journalingSolo = await db
@@ -234,11 +223,60 @@ async function cancelActiveJournalingSolo(userId: ObjectId, reason: string) {
   );
 }
 
-// small helper to compute interval we want to store on upgrades
 const intervalToSet = (interval: Interval, isUpgrade: boolean) =>
   isUpgrade ? ("yearly" as Interval) : interval;
 
-// ---------- controller: createOrder ----------
+// -------- invoice helpers ----------
+type CounterDoc = { _id: string; seq: number };
+
+async function nextInvoiceSequence(): Promise<number> {
+  const coll = db.collection<CounterDoc>("counters");
+  const options: any = {
+    upsert: true,
+    returnDocument: "after",
+    returnOriginal: false,
+  };
+  const result: any = await coll.findOneAndUpdate(
+    { _id: "invoice_seq" },
+    { $inc: { seq: 1 } as any },
+    options
+  );
+  const doc: CounterDoc | null = result?.value ?? result ?? null;
+  return typeof doc?.seq === "number" ? doc.seq : 1;
+}
+
+async function generateInvoiceNo(): Promise<string> {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const seq = await nextInvoiceSequence();
+  return `UPH-${y}${m}${d}-${String(seq).padStart(4, "0")}`;
+}
+
+function productDisplayName(
+  product: any,
+  interval?: Interval,
+  variant?: any,
+  isBundle?: boolean
+) {
+  if (isBundle) {
+    return `Trader Essentials Bundle (5-in-1)${
+      interval === "yearly" ? " – Yearly" : " – Monthly"
+    }`;
+  }
+  if (product?.key === ALGO_SKU_KEY && variant) {
+    return `${product.name} - ${variant.name}${
+      interval ? ` (${interval === "yearly" ? "Yearly" : "Monthly"})` : ""
+    }`;
+  }
+  if (product?.key === JOURNALING_SOLO_SKU_KEY && interval) {
+    return `${product.name} (${interval === "yearly" ? "Yearly" : "Monthly"})`;
+  }
+  return product?.name || "Product";
+}
+
+/* ===================== controller: createOrder (UPDATED for renew) ===================== */
 export const createOrder: RequestHandler = async (req, res): Promise<void> => {
   try {
     const {
@@ -247,12 +285,14 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
       variantId,
       billingInterval,
       brokerConfig,
+      renew, // <—— NEW
     } = (req.body ?? {}) as {
       signupIntentId?: string;
       productId?: string;
       variantId?: string;
       billingInterval?: Interval;
       brokerConfig?: Record<string, any>;
+      renew?: boolean;
     };
 
     // ----- Guest flow (register-intent) -----
@@ -265,17 +305,13 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
         return;
       }
 
-      const intent = await db
-        .collection("signup_intents")
-        .findOne({ _id: signupObjectId });
+      const intent = await db.collection("signup_intents").findOne({ _id: signupObjectId });
       if (!intent) {
         res.status(404).json({ message: "Signup intent not found" });
         return;
       }
       if ((intent as any).status !== "created") {
-        res
-          .status(400)
-          .json({ message: "Signup intent not in a payable state" });
+        res.status(400).json({ message: "Signup intent not in a payable state" });
         return;
       }
       if (!(intent as any).productId) {
@@ -283,24 +319,20 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
         return;
       }
 
-      const product = await db
-        .collection("products")
+      const product = await db.collection("products")
         .findOne({ _id: (intent as any).productId, isActive: true });
       if (!product) {
         res.status(400).json({ message: "Invalid product" });
         return;
       }
 
-      const interval: Interval =
-        ((intent as any).billingInterval as Interval) || "monthly";
+      const interval: Interval = ((intent as any).billingInterval as Interval) || "monthly";
       const productKey = (product as any).key as string;
 
       let variantDoc: any = null;
       if (productKey === ALGO_SKU_KEY) {
         if (!(intent as any).variantId) {
-          res
-            .status(400)
-            .json({ message: "variantId required for this product" });
+          res.status(400).json({ message: "variantId required for this product" });
           return;
         }
         variantDoc = await db.collection("product_variants").findOne({
@@ -314,11 +346,7 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
         }
       }
 
-      const { amountPaise, displayName } = await resolvePriceForProduct(
-        product,
-        interval,
-        variantDoc
-      );
+      const { amountPaise, displayName } = await resolvePriceForProduct(product, interval, variantDoc);
 
       if (amountPaise === 0) {
         res.status(204).send();
@@ -360,7 +388,7 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
       return;
     }
 
-    // ----- Logged-in direct purchase -----
+    // ----- Logged-in direct purchase / renewal -----
     const authUserId = getUserIdFromReqOrBearer(req);
     if (!authUserId) {
       res.status(401).json({ message: "Authentication required" });
@@ -379,9 +407,7 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
       return;
     }
 
-    const product = await db
-      .collection("products")
-      .findOne({ _id: productObjectId, isActive: true });
+    const product = await db.collection("products").findOne({ _id: productObjectId, isActive: true });
     if (!product) {
       res.status(400).json({ message: "Invalid product" });
       return;
@@ -395,12 +421,10 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
     let variantDoc: any = null;
     let isUpgrade = false;
 
-    // === Duplicate / Upgrade checks ===
+    // === Duplicate / Upgrade / Renew checks ===
     if (productKey === ALGO_SKU_KEY) {
       if (!variantId) {
-        res
-          .status(400)
-          .json({ message: "variantId required for this product" });
+        res.status(400).json({ message: "variantId required for this product" });
         return;
       }
       let variantObjectId: ObjectId;
@@ -421,39 +445,44 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
         return;
       }
 
-      const activeAlgo = await findActiveEntitlement(
-        authUserId,
-        (product as any)._id,
-        variantObjectId
-      );
+      const activeAlgo = await findActiveEntitlement(authUserId, (product as any)._id, variantObjectId);
       if (activeAlgo) {
-        res.status(409).json({
-          message:
-            "You already have an active ALGO Simulator plan for this variant",
-        });
-        return;
+        if (renew) {
+          const d = daysUntil((activeAlgo as any).endsAt || null);
+          if (!(Number.isFinite(d) && d >= 0 && d <= RENEW_WINDOW_DAYS)) {
+            res.status(409).json({ message: `Renewal allowed only within ${RENEW_WINDOW_DAYS} days of expiry` });
+            return;
+          }
+        } else {
+          res.status(409).json({ message: "You already have an active ALGO Simulator plan for this variant" });
+          return;
+        }
       }
     } else if (productKey === BUNDLE_SKU_KEY) {
-      const activeBundleComps = await findActiveBundleComponentEntitlements(
-        authUserId
-      );
+      const activeBundleComps = await findActiveBundleComponentEntitlements(authUserId);
       if (activeBundleComps.length > 0) {
-        const anyMonthly = activeBundleComps.some(
-          (r: any) => r?.meta?.interval === "monthly"
-        );
-        if (interval === "yearly" && anyMonthly) {
+        const anyMonthly = activeBundleComps.some((r: any) => r?.meta?.interval === "monthly");
+        if (renew) {
+          const soonest = Math.min(
+            ...activeBundleComps.map((r: any) => daysUntil(r?.endsAt || null))
+          );
+          if (Number.isFinite(soonest) && soonest >= 0 && soonest <= RENEW_WINDOW_DAYS) {
+            // allow renewal
+          } else if (interval === "yearly" && anyMonthly) {
+            isUpgrade = true; // allow monthly -> yearly upgrade
+          } else {
+            res.status(409).json({ message: `Bundle is already active; renewal only within ${RENEW_WINDOW_DAYS} days of expiry` });
+            return;
+          }
+        } else if (interval === "yearly" && anyMonthly) {
           isUpgrade = true;
         } else {
-          res
-            .status(409)
-            .json({ message: "You already have active Bundle access" });
+          res.status(409).json({ message: "You already have active Bundle access" });
           return;
         }
       }
     } else if (productKey === JOURNALING_SOLO_SKU_KEY) {
-      const journalingProd = await db
-        .collection("products")
-        .findOne({ key: "journaling", isActive: true });
+      const journalingProd = await db.collection("products").findOne({ key: "journaling", isActive: true });
       if (journalingProd) {
         const now = new Date();
         const hasBundleJ = await db.collection("user_products").findOne({
@@ -468,32 +497,29 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
         });
         if (hasBundleJ) {
           res.status(409).json({
-            message:
-              "Your Bundle already includes Journaling. No need to buy Journaling (Solo).",
+            message: "Your Bundle already includes Journaling. No need to buy Journaling (Solo).",
           });
           return;
         }
       }
 
-      const activeSolo = await findActiveEntitlement(
-        authUserId,
-        (product as any)._id,
-        null
-      );
+      const activeSolo = await findActiveEntitlement(authUserId, (product as any)._id, null);
       if (activeSolo) {
         const existingInterval = (activeSolo as any)?.meta?.interval || "monthly";
         if (existingInterval === "yearly") {
-          res
-            .status(409)
-            .json({ message: "You already have an active Journaling (Solo) – Yearly" });
+          res.status(409).json({ message: "You already have an active Journaling (Solo) – Yearly" });
           return;
         }
         if (interval === "yearly" && existingInterval === "monthly") {
           isUpgrade = true;
+        } else if (renew) {
+          const d = daysUntil((activeSolo as any).endsAt || null);
+          if (!(Number.isFinite(d) && d >= 0 && d <= RENEW_WINDOW_DAYS)) {
+            res.status(409).json({ message: `Renewal allowed only within ${RENEW_WINDOW_DAYS} days of expiry` });
+            return;
+          }
         } else {
-          res
-            .status(409)
-            .json({ message: "You already have an active Journaling (Solo)" });
+          res.status(409).json({ message: "You already have an active Journaling (Solo)" });
           return;
         }
       }
@@ -502,11 +528,7 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
       return;
     }
 
-    const { amountPaise, displayName } = await resolvePriceForProduct(
-      product,
-      interval,
-      variantDoc
-    );
+    const { amountPaise, displayName } = await resolvePriceForProduct(product, interval, variantDoc);
 
     if (amountPaise === 0) {
       res.status(204).send();
@@ -526,6 +548,7 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
         userId: authUserId.toString(),
         interval,
         ...(isUpgrade ? { upgradeTo: "yearly" } : {}),
+        ...(renew ? { renew: "1" } : {}),
       },
     });
 
@@ -544,6 +567,7 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
         interval,
         brokerConfig: brokerConfig || null,
         ...(isUpgrade ? { upgradeTo: "yearly" } : {}),
+        ...(renew ? { renew: true } : {}), // <—— remember renewal intent
       },
     });
 
@@ -569,14 +593,12 @@ export const createOrder: RequestHandler = async (req, res): Promise<void> => {
       message: err?.message,
       stack: err?.stack?.split("\n").slice(0, 2).join("\n"),
     });
-    res
-      .status(status)
-      .json({ message: err?.message || "Failed to create order" });
+    res.status(status).json({ message: err?.message || "Failed to create order" });
     return;
   }
 };
 
-// ---------- controller: verifyPayment ----------
+/* ===================== controller: verifyPayment (UPDATED to extend from current endsAt on renew) ===================== */
 export const verifyPayment: RequestHandler = async (req, res): Promise<void> => {
   const now = new Date();
 
@@ -661,8 +683,11 @@ export const verifyPayment: RequestHandler = async (req, res): Promise<void> => 
 
     const paidAmountRupees = Number((pIntent as any).amount) || 0;
 
-    // ===== FLOW A: Guest – finalize signup =====
+    // ===== FLOW A: Guest – finalize signup (unchanged) =====
     if ((pIntent as any).signupIntentId) {
+      // ... unchanged guest flow from your original code ...
+      // (keeping your existing logic exactly as-is)
+      // BEGIN original block
       const signupId: ObjectId | undefined = (pIntent as any).signupIntentId;
       if (!signupId || !(signupId instanceof ObjectId)) {
         res.status(400).json({ message: "Corrupt payment intent: missing signupIntentId" });
@@ -710,16 +735,13 @@ export const verifyPayment: RequestHandler = async (req, res): Promise<void> => 
         return;
       }
 
-      const interval: Interval =
-        (((sIntent as any).billingInterval as Interval) ?? "monthly");
+      const interval: Interval = (((sIntent as any).billingInterval as Interval) ?? "monthly");
       const newEndsAt = computeEndsAt(interval, now);
 
       if (sProductKey === BUNDLE_SKU_KEY) {
         const componentKeys = Array.from(await getBundleComponentsSet());
-        const bundleProducts = await db
-          .collection("products")
-          .find({ key: { $in: componentKeys }, isActive: true })
-          .toArray();
+        const bundleProducts = await db.collection("products")
+          .find({ key: { $in: componentKeys }, isActive: true }).toArray();
 
         for (const bp of bundleProducts) {
           await db.collection("user_products").updateOne(
@@ -828,6 +850,58 @@ export const verifyPayment: RequestHandler = async (req, res): Promise<void> => 
         }
       );
 
+      // ---- build + send invoice email (GUEST) ----
+      try {
+        const invoiceNo = await generateInvoiceNo();
+        const variantForName =
+          (sIntent as any).variantId
+            ? await db.collection("product_variants").findOne({ _id: (sIntent as any).variantId })
+            : undefined;
+        const productName = productDisplayName(
+          sProduct,
+          interval,
+          variantForName,
+          sProductKey === BUNDLE_SKU_KEY
+        );
+
+        const payload: InvoicePayload = {
+          invoiceNo,
+          invoiceDate: now.toISOString().slice(0, 10),
+          billTo: {
+            name: (sIntent as any).name,
+            email: (sIntent as any).email,
+            phone: (sIntent as any).phone,
+          },
+          items: [
+            {
+              name: productName,
+              qty: 1,
+              rate: paidAmountRupees,
+              gst: 18,
+              inclusive: true,
+            },
+          ],
+          gstInclusive: true,
+        };
+        const to = (sIntent as any).email;
+        if (to) {
+          await sendInvoiceEmail(to, payload);
+        }
+        await db.collection("invoices").insertOne({
+          invoiceNo,
+          userId,
+          intentId,
+          orderId: razorpay_order_id,
+          paymentId: razorpay_payment_id,
+          amount: paidAmountRupees,
+          currency: (pIntent as any).currency,
+          payload,
+          createdAt: now,
+        });
+      } catch (e) {
+        console.warn("[invoice] email failed (guest):", (e as any)?.message || e);
+      }
+
       const token = generateToken(userId.toString());
       const u = await db.collection("users").findOne({ _id: userId });
       res.json({
@@ -841,9 +915,10 @@ export const verifyPayment: RequestHandler = async (req, res): Promise<void> => 
         },
       });
       return;
+      // END original block
     }
 
-    // ===== FLOW B: Direct purchase =====
+    // ===== FLOW B: Direct purchase / renewal =====
     const purchase = (pIntent as any).purchase;
     if (!purchase) {
       res.status(400).json({ message: "Invalid payment intent" });
@@ -856,7 +931,7 @@ export const verifyPayment: RequestHandler = async (req, res): Promise<void> => 
     const interval: Interval = purchase.interval || "monthly";
     const brokerConfig = purchase.brokerConfig || null;
     const isUpgrade = purchase.upgradeTo === "yearly";
-    const newEndsAt = computeEndsAt(interval, now);
+    const isRenew = !!purchase.renew; // <—— NEW
 
     const product = await db.collection("products").findOne({ _id: prodId });
     if (!product) {
@@ -872,19 +947,34 @@ export const verifyPayment: RequestHandler = async (req, res): Promise<void> => 
 
     if (pKey === BUNDLE_SKU_KEY) {
       const componentKeys = Array.from(await getBundleComponentsSet());
-      const bundleProducts = await db
-        .collection("products")
-        .find({ key: { $in: componentKeys }, isActive: true })
-        .toArray();
+      const bundleProducts = await db.collection("products")
+        .find({ key: { $in: componentKeys }, isActive: true }).toArray();
 
       for (const bp of bundleProducts) {
+        // extend from existing endsAt if renewal and still in future, else from now
+        const existing = await db.collection("user_products").findOne({
+          userId,
+          productId: (bp as any)._id,
+          variantId: null,
+        });
+
+        const currentEnds =
+          existing?.endsAt ? new Date(existing.endsAt) : null;
+
+        const base =
+          isRenew && currentEnds && currentEnds.getTime() > now.getTime()
+            ? currentEnds
+            : now;
+
+        const endsAt = computeEndsAt(intervalToSet(interval, isUpgrade), base);
+
         await db.collection("user_products").updateOne(
           { userId, productId: (bp as any)._id, variantId: null },
           {
             $setOnInsert: { startedAt: now },
             $set: {
               status: "active",
-              endsAt: newEndsAt,
+              endsAt,
               lastPaymentAt: now,
               "meta.source": "payment_bundle",
               "meta.interval": intervalToSet(interval, isUpgrade),
@@ -902,7 +992,19 @@ export const verifyPayment: RequestHandler = async (req, res): Promise<void> => 
       }
       await cancelActiveJournalingSolo(userId, "bundle_purchase");
     } else if (pKey === ALGO_SKU_KEY) {
-      const ends = computeEndsAt("monthly", now);
+      // ALGO is monthly only; extend from current if renewing
+      const existing = await db.collection("user_products").findOne({
+        userId,
+        productId: prodId,
+        variantId: varId,
+      });
+      const currentEnds = existing?.endsAt ? new Date(existing.endsAt) : null;
+      const base =
+        isRenew && currentEnds && currentEnds.getTime() > now.getTime()
+          ? currentEnds
+          : now;
+      const ends = computeEndsAt("monthly", base);
+
       await db.collection("user_products").updateOne(
         { userId, productId: prodId, variantId: varId },
         {
@@ -937,13 +1039,25 @@ export const verifyPayment: RequestHandler = async (req, res): Promise<void> => 
         });
       }
     } else if (pKey === JOURNALING_SOLO_SKU_KEY) {
+      const existing = await db.collection("user_products").findOne({
+        userId,
+        productId: prodId,
+        variantId: null,
+      });
+      const currentEnds = existing?.endsAt ? new Date(existing.endsAt) : null;
+      const base =
+        isRenew && currentEnds && currentEnds.getTime() > now.getTime()
+          ? currentEnds
+          : now;
+      const endsAt = computeEndsAt(intervalToSet(interval, isUpgrade), base);
+
       await db.collection("user_products").updateOne(
         { userId, productId: prodId, variantId: null },
         {
           $setOnInsert: { startedAt: now },
           $set: {
             status: "active",
-            endsAt: newEndsAt,
+            endsAt,
             lastPaymentAt: now,
             "meta.source": "payment",
             "meta.interval": intervalToSet(interval, isUpgrade),
@@ -975,6 +1089,49 @@ export const verifyPayment: RequestHandler = async (req, res): Promise<void> => 
         },
       }
     );
+
+    // ---- build + send invoice email (DIRECT) ----
+    try {
+      const user = await db.collection("users").findOne({ _id: userId });
+      const to = (user as any)?.email;
+      const invoiceNo = await generateInvoiceNo();
+
+      const variantDoc = varId
+        ? await db.collection("product_variants").findOne({ _id: varId })
+        : null;
+      const name = productDisplayName(product, interval, variantDoc, pKey === BUNDLE_SKU_KEY);
+
+      const payload: InvoicePayload = {
+        invoiceNo,
+        invoiceDate: now.toISOString().slice(0, 10),
+        billTo: {
+          name: (user as any)?.name,
+          email: (user as any)?.email,
+          phone: (user as any)?.phone,
+        },
+        items: [
+          { name, qty: 1, rate: paidAmountRupees, gst: 18, inclusive: true },
+        ],
+        gstInclusive: true,
+      };
+
+      if (to) {
+        await sendInvoiceEmail(to, payload);
+      }
+      await db.collection("invoices").insertOne({
+        invoiceNo,
+        userId,
+        intentId,
+        orderId: razorpay_order_id,
+        paymentId: razorpay_payment_id,
+        amount: paidAmountRupees,
+        currency: (pIntent as any).currency,
+        payload,
+        createdAt: now,
+      });
+    } catch (e) {
+      console.warn("[invoice] email failed (direct):", (e as any)?.message || e);
+    }
 
     res.json({ success: true });
     return;

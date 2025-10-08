@@ -1,3 +1,4 @@
+//server/src/routes/products.routes.ts
 import { Router } from 'express';
 import { Db, ObjectId } from 'mongodb';
 import { setDatabase as setAuthDb } from '../controllers/auth.controller';

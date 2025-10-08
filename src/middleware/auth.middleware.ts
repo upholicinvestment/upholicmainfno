@@ -1,3 +1,4 @@
+// auth.middleware.ts
 import { RequestHandler } from "express";
 import jwt from "jsonwebtoken";
 import type { Db, ObjectId } from "mongodb";

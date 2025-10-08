@@ -1,4 +1,3 @@
-// server/src/controllers/user.controller.ts
 import type { Request, Response, RequestHandler } from "express";
 import { Db, ObjectId } from "mongodb";
 import jwt from "jsonwebtoken";
@@ -25,7 +24,11 @@ const toObjectId = (id: string | ObjectId): ObjectId => {
 export const getUserIdFromReq = (req: Request): ObjectId | null => {
   const u = (req as any).user;
   if (u?.id) {
-    try { return toObjectId(u.id); } catch { /* ignore */ }
+    try {
+      return toObjectId(u.id);
+    } catch {
+      /* ignore */
+    }
   }
 
   const auth = req.headers.authorization;
@@ -34,7 +37,9 @@ export const getUserIdFromReq = (req: Request): ObjectId | null => {
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET) as { id?: string };
       if (decoded?.id) return toObjectId(decoded.id);
-    } catch { /* invalid token -> fall through */ }
+    } catch {
+      /* invalid token -> fall through */
+    }
   }
 
   const hdrUserId = req.header("X-User-Id");
@@ -51,15 +56,8 @@ export const getUserIdFromReq = (req: Request): ObjectId | null => {
 };
 
 /** ---------- Avatars (frontend maps keys -> images in src/assets/avatars) ---------- */
-export const AVATAR_KEYS = [
-  "sienna",
-  "analyst",
-  "rose",
-  "comet",
-  "crimson",
-  "prime",
-] as const;
-type AvatarKey = typeof AVATAR_KEYS[number];
+export const AVATAR_KEYS = ["sienna", "analyst", "rose", "comet", "crimson", "prime"] as const;
+type AvatarKey = (typeof AVATAR_KEYS)[number];
 
 /** GET /api/users/me/avatar-options */
 export const getAvatarOptions: RequestHandler = async (_req, res) => {
@@ -76,10 +74,9 @@ export const getProfile: RequestHandler = async (req, res) => {
     }
 
     const _db = requireDb();
-    const user = await _db.collection("users").findOne(
-      { _id: userId },
-      { projection: { password: 0 } }
-    );
+    const user = await _db
+      .collection("users")
+      .findOne({ _id: userId }, { projection: { password: 0 } });
 
     if (!user) {
       res.status(404).json({ message: "User not found" });
@@ -147,7 +144,6 @@ export const updateProfile: RequestHandler = async (req, res) => {
     }
 
     const $set: Record<string, any> = { updatedAt: new Date() };
-
     if (typeof body.name === "string") $set.name = body.name;
     if (typeof body.email === "string") $set.email = body.email;
     if (typeof body.phone === "string") $set.phone = body.phone;
@@ -155,13 +151,11 @@ export const updateProfile: RequestHandler = async (req, res) => {
     if (typeof body.broker === "string") $set.broker = body.broker;
     if (typeof body.location === "string") $set.location = body.location;
     if (typeof body.avatarKey === "string") $set.avatarKey = body.avatarKey;
-
     if (typeof body.tradingStyle === "string") $set.tradingStyle = body.tradingStyle;
     if (typeof body.experienceYears === "string") $set.experienceYears = body.experienceYears;
     if (typeof body.riskProfile === "string") $set.riskProfile = body.riskProfile;
     if (Array.isArray(body.instruments)) $set.instruments = body.instruments;
     if (typeof body.timezone === "string") $set.timezone = body.timezone;
-
     if (typeof body.notifyAnnouncements === "boolean") $set.notifyAnnouncements = body.notifyAnnouncements;
     if (typeof body.notifyOrderAlerts === "boolean") $set.notifyOrderAlerts = body.notifyOrderAlerts;
     if (typeof body.notifyRenewals === "boolean") $set.notifyRenewals = body.notifyRenewals;
@@ -180,13 +174,19 @@ export const updateProfile: RequestHandler = async (req, res) => {
   }
 };
 
+/** ---------- /users/me/products ---------- */
 type OutVariant = {
   variantId: ObjectId;
   key: string;
   name: string;
   priceMonthly?: number | null;
   interval?: string | null;
+  /** NEW: carry entitlement-specific fields so frontend can decide renewals per variant */
+  endsAt?: Date | null;
+  startedAt?: Date | null;
+  status?: string;
 };
+
 type OutItem = {
   productId: ObjectId;
   key: string;
@@ -196,10 +196,10 @@ type OutItem = {
   forSale: boolean;
   status: string;
   startedAt: Date | null;
-  endsAt: Date | null;
+  endsAt: Date | null; // max of all entitlements for this product
   meta?: any;
-  variant: OutVariant | null;
-  variants?: OutVariant[];
+  variant: OutVariant | null; // one example (first seen)
+  variants?: OutVariant[]; // all unique variants the user owns (each with its own endsAt)
 };
 
 export const getMyProducts: RequestHandler = async (req, res) => {
@@ -238,7 +238,7 @@ export const getMyProducts: RequestHandler = async (req, res) => {
     }
 
     const productIds = Array.from(
-      new Set(entitlements.map((e: any) => (e.productId as ObjectId).toString()))
+      new Set(entitlements.map((e: any) => (e.productId as ObjectId).toString())),
     ).map((s) => new ObjectId(s));
 
     const products = await _db
@@ -255,8 +255,8 @@ export const getMyProducts: RequestHandler = async (req, res) => {
         entitlements
           .map((e: any) => e.variantId)
           .filter((v: any) => v && ObjectId.isValid(v))
-          .map((v: any) => v.toString())
-      )
+          .map((v: any) => v.toString()),
+      ),
     ).map((s) => new ObjectId(s));
 
     const variantMap = new Map<string, any>();
@@ -266,7 +266,6 @@ export const getMyProducts: RequestHandler = async (req, res) => {
         .find({ _id: { $in: variantIds }, isActive: true })
         .project({ key: 1, name: 1, priceMonthly: 1, interval: 1, productId: 1 })
         .toArray();
-
       variants.forEach((v: any) => variantMap.set((v._id as ObjectId).toString(), v));
     }
 
@@ -280,9 +279,10 @@ export const getMyProducts: RequestHandler = async (req, res) => {
       const baseKey = (prod.key as string) || "";
       const existing = grouped.get(pid);
 
-      const mkOutVariant = (): OutVariant | null => {
-        if (!e.variantId) return null;
-        const vid = (e.variantId as ObjectId).toString();
+      // Build OutVariant WITH entitlement dates/status
+      const mkOutVariant = (ent: any): OutVariant | null => {
+        if (!ent.variantId) return null;
+        const vid = (ent.variantId as ObjectId).toString();
         const v = variantMap.get(vid);
         if (!v) return null;
         return {
@@ -291,11 +291,14 @@ export const getMyProducts: RequestHandler = async (req, res) => {
           name: v.name as string,
           priceMonthly: v.priceMonthly ?? null,
           interval: v.interval ?? null,
+          endsAt: ent.endsAt ?? null,
+          startedAt: ent.startedAt ?? null,
+          status: ent.status ?? undefined,
         };
       };
 
       if (!existing) {
-        const firstVariant = mkOutVariant();
+        const firstVariant = mkOutVariant(e);
         const set = new Set<string>();
         if (firstVariant) set.add((firstVariant.variantId as ObjectId).toString());
 
@@ -315,17 +318,21 @@ export const getMyProducts: RequestHandler = async (req, res) => {
           _variantSet: set,
         });
       } else {
+        // keep earliest start
         const prevStart = existing.startedAt ? new Date(existing.startedAt).getTime() : Infinity;
         const currStart = e.startedAt ? new Date(e.startedAt).getTime() : Infinity;
-        existing.startedAt = isFinite(prevStart) && isFinite(currStart)
-          ? new Date(Math.min(prevStart, currStart))
-          : (existing.startedAt || (e.startedAt ?? null));
+        existing.startedAt =
+          isFinite(prevStart) && isFinite(currStart)
+            ? new Date(Math.min(prevStart, currStart))
+            : existing.startedAt || (e.startedAt ?? null);
 
+        // keep latest end (max across entitlements for this product)
         const prevEnd = existing.endsAt ? new Date(existing.endsAt).getTime() : 0;
         const currEnd = e.endsAt ? new Date(e.endsAt).getTime() : 0;
         if (currEnd > prevEnd) existing.endsAt = e.endsAt ?? existing.endsAt;
 
-        const ov = mkOutVariant();
+        // attach unique variants with their own entitlement windows
+        const ov = mkOutVariant(e);
         if (ov) {
           const vidStr = (ov.variantId as ObjectId).toString();
           if (!existing._variantSet!.has(vidStr)) {
@@ -342,6 +349,7 @@ export const getMyProducts: RequestHandler = async (req, res) => {
       return rest;
     });
 
+    // If full journaling is granted (bundle), hide journaling_solo to avoid duplicates
     const hasBundleJournaling = items.some((it) => it.key === "journaling");
     if (hasBundleJournaling) {
       items = items.filter((it) => it.key !== "journaling_solo");

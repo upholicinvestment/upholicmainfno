@@ -1,5 +1,5 @@
 import WebSocket, { RawData } from "ws";
-import { saveLTP } from "../services/ltp.service";
+// import { saveLTP } from "../services/ltp.service";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -64,7 +64,7 @@ export class DhanSocket {
         if (feedCode === 2) {
           const ltp = buf.readFloatLE(8);
           // console.log(`💹 [Ticker] SecID=${secId} LTP=${ltp}`);
-          saveLTP({ securityId: secId, LTP: ltp });
+          // saveLTP({ securityId: secId, LTP: ltp });
         }
       }
     } catch (err) {

@@ -1,3 +1,4 @@
+// error.middleware.ts
 import { Request, Response, NextFunction } from 'express';
 import validationResult from 'express-validator';
 import { MongoError } from 'mongodb';

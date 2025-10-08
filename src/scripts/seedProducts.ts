@@ -1,4 +1,4 @@
-// server/src/seedProducts.ts
+// server/src/scripts/seedProducts.ts
 import path from "path";
 import dotenv from "dotenv";
 import crypto from "crypto";

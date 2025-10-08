@@ -1,3 +1,4 @@
+//server/src/routes/payment.routes.ts
 import { Router } from "express";
 import { createOrder, verifyPayment } from "../controllers/payment.controller";
 

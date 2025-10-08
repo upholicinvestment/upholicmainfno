@@ -1,3 +1,4 @@
+//server/src/auth.routes.ts 
 import { Router } from "express";
 import {
   registerIntent,

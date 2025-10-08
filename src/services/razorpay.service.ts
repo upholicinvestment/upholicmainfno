@@ -1,3 +1,4 @@
+// server/src/services/razorpay.service.ts
 import Razorpay from "razorpay";
 
 if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {

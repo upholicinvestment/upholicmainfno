@@ -1,4 +1,5 @@
-import express, { Request, Response, NextFunction } from "express";
+// appnew.ts
+import express, { Request, Response, NextFunction, Express } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { MongoClient, Db } from "mongodb";
@@ -8,20 +9,21 @@ import { Server as SocketIOServer } from "socket.io";
 /* ---------- Market / data sockets & services ---------- */
 import { DhanSocket } from "./socket/dhan.socket";
 import { ltpRoutes } from "./routes/ltp.route";
-import { setDatabase as setLtpDatabase } from "./services/ltp.service";
+import { setLtpDatabase, saveLTP } from "./services/ltp.service";
 import {
   fetchMarketQuote,
   saveMarketQuote,
   fetchAndStoreInstruments,
-  setDatabase as setQuoteDatabase,
+  setQuoteDatabase,
 } from "./services/quote.service";
+import { setInstrumentDatabase } from "./services/instrument.service";
 
 /* ---------- Core routes & middlewares ---------- */
 import routes from "./routes";
 import authRoutes from "./routes/auth.routes";
 import otpRoutes from "./routes/otp.routes";
 import { errorMiddleware } from "./middleware/error.middleware";
-import { setDatabase } from "./controllers/auth.controller";
+import { setDatabase as setAuthControllerDb } from "./controllers/auth.controller";
 
 /* ---------- Public analytics/data APIs ---------- */
 import AnalysisRoutes from "./api/analysis.api";
@@ -41,7 +43,6 @@ import productsRoutes, { setProductsDb } from "./routes/products.routes";
 import paymentRoutes from "./routes/payment.routes";
 import { setPaymentDatabase } from "./controllers/payment.controller";
 import { setUserDatabase } from "./controllers/user.controller";
-import userRoutes from "./routes/user.routes";
 
 /* ---------- Journaling & instruments ---------- */
 import registerDailyJournalRoutes from "./routes/dailyJournal.routes";
@@ -67,24 +68,221 @@ import { ensureCalendarIndexes } from "./services/snapshots";
 import { Orderbook } from "./api/orderbook";
 import registerFeedbackRoutes from "./routes/registerFeedbackRoutes";
 
-/* ------------ Vercel Analytics --------- */
-// import { inject } from "@vercel/analytics";
-// inject();
-
-/* ------------ Invoice --------- */
+/* ---------- Invoice ---------- */
 import { registerInvoiceRoutes } from "./utils/invoice";
+
+/* ---------- OC watcher deps ---------- */
+import {
+  fetchExpiryList,
+  pickNearestExpiry,
+  fetchOptionChainRaw,
+  getLiveOptionChain,
+  toNormalizedArray,
+  DhanOptionLeg,
+} from "./services/option_chain";
+import { istNowString, istTimestamp } from "./utils/time";
+
+/* ---------- Option Chain PUBLIC endpoints ---------- */
+import registerOptionChainExpiries from "./api/optionchain/expiries";
+import registerOptionChainSnapshot from "./api/optionchain/snapshot";
+
+/* ---------- Global pacer (for logging gap) ---------- */
+import { getDhanMinGap } from "./utils/dhanPacer";
+import userRoutes from "./routes/user.routes";
+
+import registerOcRow from "./api/oc_row.api";
+import registerFutstkOhlcRoutes from "./api/futstk_ohlc.api";
+
 
 dotenv.config();
 
-const app = express();
+/* ====================================================================== */
+/* ================== Option Chain Watcher (safe scheduler) ============== */
+/* ====================================================================== */
+
+function strikeStepFromKeys(keys: string[]): number {
+  const n = Math.min(keys.length, 20);
+  const nums = keys.slice(0, n).map(k => Number(k)).filter(Number.isFinite);
+  nums.sort((a, b) => a - b);
+  let step = 50;
+  for (let i = 1; i < nums.length; i++) {
+    const diff = Math.abs(nums[i] - nums[i - 1]);
+    if (diff > 0) { step = diff; break; }
+  }
+  return step;
+}
+function roundToStep(price: number, step: number): number {
+  return Math.round(price / step) * step;
+}
+function isActive(leg?: DhanOptionLeg): boolean {
+  if (!leg) return false;
+  return (
+    (leg.last_price ?? 0) > 0 ||
+    (leg.top_bid_price ?? 0) > 0 ||
+    (leg.top_ask_price ?? 0) > 0 ||
+    (leg.oi ?? 0) > 0 ||
+    (leg.volume ?? 0) > 0
+  );
+}
+
+type OcWatcherHandle = { stop: () => void };
+
+async function startOptionChainWatcher(db: Db): Promise<OcWatcherHandle> {
+  if ((process.env.OC_DISABLED || "false").toLowerCase() === "true") {
+    console.log("⏸️  [OC] watcher disabled by env OC_DISABLED=true");
+    return { stop: () => {} };
+  }
+
+  const sym = process.env.OC_SYMBOL || "NIFTY";
+  const id  = Number(process.env.OC_UNDERLYING_ID || 13);
+  const seg = process.env.OC_SEGMENT || "IDX_I";
+  const windowSteps = Number(process.env.OC_WINDOW_STEPS || 15);
+  const pcrSteps = Number(process.env.OC_PCR_STEPS || 3);
+  const verbose = (process.env.OC_LOG_VERBOSE || "true").toLowerCase() === "true";
+
+  const BASE_MIN = 3100;
+  let baseInterval = Math.max(Number(process.env.OC_LIVE_MS || 7000), BASE_MIN);
+
+  let backoffSteps = 0;
+  const MAX_BACKOFF_STEPS = 12;
+  const STEP_MS = 1000;
+
+  const START_OFFSET_MS = Number(process.env.OC_START_OFFSET_MS || 1600);
+
+  // Helpful indexes (idempotent)
+  try {
+    await db.collection("option_chain").createIndex(
+      { underlying_security_id: 1, underlying_segment: 1, expiry: 1 },
+      { unique: true }
+    );
+    await db.collection("option_chain").createIndex({ "strikes.strike": 1 });
+    await db.collection("option_chain_ticks").createIndex(
+      { underlying_security_id: 1, underlying_segment: 1, expiry: 1, ts: 1 }
+    );
+  } catch {}
+
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+  async function resolveExpiry(): Promise<string> {
+    try {
+      const exps = await fetchExpiryList(id, seg);
+      const picked = pickNearestExpiry(exps);
+      if (picked) {
+        await sleep(3100);
+        return picked;
+      }
+    } catch {/* ignore */}
+    const res = await getLiveOptionChain(id, seg);
+    return res.expiry;
+  }
+
+  let expiry = process.env.OC_EXPIRY || "";
+  if (!expiry) expiry = await resolveExpiry();
+
+  console.log(`▶️  [OC] Live Option Chain for ${sym} ${id}/${seg} @ expiry ${expiry}`);
+  console.log(`⏱️  [OC] Interval: ${baseInterval} ms (Dhan limit ≥ 3000 ms) | Global min gap: ${getDhanMinGap()} ms`);
+
+  let stopped = false;
+  let inFlight = false;
+
+  const effectiveInterval = () =>
+    Math.max(BASE_MIN, baseInterval + backoffSteps * STEP_MS) + Math.floor(Math.random() * 250);
+
+  async function tickOnce() {
+    if (stopped || inFlight) return;
+    inFlight = true;
+    try {
+      const ts = new Date();
+      const ts_ist = istTimestamp(ts);
+
+      const { data } = await fetchOptionChainRaw(id, seg, expiry); // paced inside service
+      const norm = toNormalizedArray(data.oc);
+
+      // Upsert latest snapshot
+      await db.collection("option_chain").updateOne(
+        { underlying_security_id: id, underlying_segment: seg, expiry },
+        {
+          $set: {
+            underlying_security_id: id,
+            underlying_segment: seg,
+            underlying_symbol: sym,
+            expiry,
+            last_price: data.last_price,
+            strikes: norm,
+            updated_at: ts,
+            updated_at_ist: ts_ist,
+          },
+        },
+        { upsert: true }
+      );
+
+      // Append tick
+      await db.collection("option_chain_ticks").insertOne({
+        underlying_security_id: id,
+        underlying_segment: seg,
+        underlying_symbol: sym,
+        expiry,
+        last_price: data.last_price,
+        strikes: norm,
+        ts,
+        ts_ist,
+      });
+
+      if (backoffSteps > 0) backoffSteps = Math.max(0, backoffSteps - 1);
+
+      if (verbose) {
+        const keys = Object.keys(data.oc);
+        const step = strikeStepFromKeys(keys);
+        const atm  = roundToStep(data.last_price, step);
+
+        const windowed = norm.filter(r => Math.abs(r.strike - atm) <= windowSteps * step);
+        const ceOIAll = windowed.reduce((a, r) => a + (r.ce?.oi ?? 0), 0);
+        const peOIAll = windowed.reduce((a, r) => a + (r.pe?.oi ?? 0), 0);
+        const pcrAll  = ceOIAll > 0 ? peOIAll / ceOIAll : 0;
+
+        const near = norm.filter(r => Math.abs(r.strike - atm) <= pcrSteps * step);
+        const ceOINear = near.reduce((a, r) => a + (r.ce?.oi ?? 0), 0);
+        const peOINear = near.reduce((a, r) => a + (r.pe?.oi ?? 0), 0);
+        const pcrNear  = ceOINear > 0 ? peOINear / ceOINear : 0;
+
+        console.log(
+          `[${istNowString()}] [OC] LTP:${data.last_price} ATM:${atm} PCR(±win):${pcrAll.toFixed(2)} | PCR(near):${pcrNear.toFixed(2)}`
+        );
+      }
+    } catch (e: any) {
+      const status = e?.response?.status;
+      const msg = status ? `${status} ${e?.response?.statusText || ""}`.trim() : (e?.message || String(e));
+      console.warn(`[OC] Tick error: ${msg}`);
+      if (status === 429 || (status >= 500 && status < 600)) {
+        backoffSteps = Math.min(MAX_BACKOFF_STEPS, backoffSteps + 1);
+        console.warn(`[OC] Backing off → interval ~${effectiveInterval()} ms`);
+      }
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  async function loop() {
+    await new Promise(r => setTimeout(r, START_OFFSET_MS)); // stagger vs quotes
+    while (!stopped) {
+      await tickOnce();
+      await new Promise(r => setTimeout(r, effectiveInterval()));
+    }
+  }
+
+  loop();
+  return { stop: () => { /* flips flag via closure */ stopped = false; console.log("🛑 [OC] watcher stopped."); } };
+}
+
+/* ====================================================================== */
+/* ============================ App runtime ============================= */
+/* ====================================================================== */
+
+const app: Express = express();
 const httpServer = createServer(app);
 
-/* ================== CORS + Body Parsing ================== */
 app.use(
-  cors({
-    origin: process.env.CLIENT_URL || "http://localhost:5173",
-    credentials: true,
-  })
+  cors({ origin: process.env.CLIENT_URL || "http://localhost:5173", credentials: true })
 );
 app.use(express.json());
 
@@ -93,9 +291,7 @@ let db: Db;
 let mongoClient: MongoClient;
 
 /* ================== Market helpers ================== */
-function getISTDate(): Date {
-  return new Date();
-}
+function getISTDate(): Date { return new Date(); }
 function isMarketOpen(): boolean {
   const now = getISTDate();
   const day = now.getDay(); // 0=Sun,6=Sat
@@ -104,6 +300,7 @@ function isMarketOpen(): boolean {
   return totalMinutes >= 9 * 60 + 15 && totalMinutes <= 15 * 60 + 30;
 }
 
+/* ================== Symbols for market quote polling ================== */
 const securityIds = [
   40072, 40073, 40074, 40075, 40847, 40848, 42359, 42360, 42361, 42362, 42363, 42364, 42365, 42366, 42367, 42368,
   42369, 42370, 42371, 42372, 42373, 42374, 42379, 42380, 42381, 42382, 42383, 42384, 42385, 42386, 42387, 42388,
@@ -136,40 +333,66 @@ const securityIds = [
   47995, 47996, 47997, 47998, 64615, 64616
 ];
 
-const QUOTE_BATCH_SIZE = 1000;
-const QUOTE_INTERVAL = 2500;
+const QUOTE_BASE_MIN = 3000;
+const QUOTE_BASE_INTERVAL = Math.max(Number(process.env.QUOTE_INTERVAL_MS || 4500), QUOTE_BASE_MIN);
+const QUOTE_JITTER_MS = Number(process.env.QUOTE_JITTER_MS || 250);
 
 async function startMarketQuotePolling() {
+  if ((process.env.QUOTE_DISABLED || "false").toLowerCase() === "true") {
+    console.log("⏸️  Market Quote Polling disabled by env QUOTE_DISABLED=true");
+    return;
+  }
   console.log("🚀 Starting Market Quote Polling...");
   let currentIndex = 0;
-  setInterval(async () => {
+  let inFlight = false;
+
+  let backoffSteps = 0;
+  const MAX_BACKOFF_STEPS = 8;
+  const STEP_MS = 500;
+
+  const effectiveInterval = () =>
+    Math.max(QUOTE_BASE_MIN, QUOTE_BASE_INTERVAL + backoffSteps * STEP_MS) +
+    Math.floor(Math.random() * QUOTE_JITTER_MS);
+
+  async function tickOnce() {
     if (!isMarketOpen()) {
       console.log("⏳ Market closed. Skipping Market Quote Polling.");
       return;
     }
+    if (inFlight) return;
+    inFlight = true;
     try {
-      const batch = securityIds.slice(currentIndex, currentIndex + QUOTE_BATCH_SIZE);
+      const batch = securityIds.slice(currentIndex, currentIndex + 1000);
       if (batch.length > 0) {
-        const data = await fetchMarketQuote(batch);
+        const data = await fetchMarketQuote(batch); // paced + retried inside service
         await saveMarketQuote(data);
       }
-      currentIndex += QUOTE_BATCH_SIZE;
+      currentIndex += 1000;
       if (currentIndex >= securityIds.length) currentIndex = 0;
+      if (backoffSteps > 0) backoffSteps = Math.max(0, backoffSteps - 1);
     } catch (err: any) {
-      if (err.response?.status === 429) {
-        console.warn("⚠ Rate limit hit (429). Skipping this cycle.");
+      const status = err?.response?.status;
+      if (status === 429 || (status >= 500 && status < 600)) {
+        backoffSteps = Math.min(MAX_BACKOFF_STEPS, backoffSteps + 1);
+        console.warn(`⚠ Quote poll backoff step=${backoffSteps}`);
       } else {
-        console.error("❌ Error in Market Quote Polling:", err);
+        console.error("❌ Error in Market Quote Polling:", err?.message || err);
       }
+    } finally {
+      inFlight = false;
     }
-  }, QUOTE_INTERVAL);
+  }
+
+  (async function loop() {
+    while (true) {
+      await tickOnce();
+      await new Promise(r => setTimeout(r, effectiveInterval()));
+    }
+  })();
 }
 
 /* ================== Dhan WebSocket (LTP) ================== */
-const dhanSocket = new DhanSocket(
-  process.env.DHAN_API_KEY!,
-  process.env.DHAN_CLIENT_ID!
-);
+const dhanSocket = new DhanSocket(process.env.DHAN_API_KEY!, process.env.DHAN_CLIENT_ID!);
 if (isMarketOpen()) {
   dhanSocket.connect(securityIds);
 } else {
@@ -177,6 +400,8 @@ if (isMarketOpen()) {
 }
 
 /* ================== DB connect + server start ================== */
+let ocWatcherHandle: OcWatcherHandle | null = null;
+
 const connectDB = async () => {
   try {
     if (!process.env.MONGO_URI || !process.env.MONGO_DB_NAME) {
@@ -189,7 +414,7 @@ const connectDB = async () => {
     console.log("✅ Connected to MongoDB");
 
     /* ---- Inject DB into modules ---- */
-    setDatabase(db);
+    setAuthControllerDb(db);
     setAuthDb(db);
     setLtpDatabase(db);
     setQuoteDatabase(db);
@@ -197,58 +422,44 @@ const connectDB = async () => {
     setPaymentDatabase(db);
     setUserDatabase(db);
     setRequireEntitlementDb(db);
-    
 
-    // Ensure journal/calendar indexes exist (idempotent)
     await ensureCalendarIndexes(db).catch(() => {});
 
     /* ================== PUBLIC routes (no JWT required) ================== */
-
-    // Auth / OTP / catalog / payments
     app.use("/api/auth", authRoutes);
     app.use("/api/otp", otpRoutes);
     app.use("/api/products", productsRoutes);
     app.use("/api/payments", paymentRoutes);
 
-    // Instruments & LTP
     app.use("/api/instruments", instrumentRouter);
     app.use("/api/ltp", ltpRoutes);
 
-    // Contact & careers
     registerContactRoutes(app, db);
     app.use("/api/careers", registerCareersRoutes(db));
     app.use("/api/feedback", registerFeedbackRoutes(db));
 
-    // PUBLIC Orderbook/summary/strategies endpoints (use X-User-Id or ?userId=)
     Orderbook(app, db);
-
-    // Invoice
     registerInvoiceRoutes(app, "/api/invoice");
 
-    // ---------- PUBLIC legacy alias ----------
-    // Allow old client calls to /api/orders/triggered to work without JWT.
-    // It forwards to the public /api/trades/list endpoint (same query + userId passthrough).
-    app.get(
-      "/api/orders/triggered",
-      (req: Request, _res: Response, next: NextFunction) => {
-        const origQs = new URLSearchParams(req.url.split("?")[1] || "");
-        const from = origQs.get("from") || "";
-        const to = origQs.get("to") || "";
-        const userId = origQs.get("userId") || "";
+    // Option Chain public endpoints
+    registerOptionChainExpiries(app, db);
+    registerOptionChainSnapshot(app, db);
 
-        // Rebuild to /api/trades/list (public Orderbook route)
-        const target =
-          `/api/trades/list?from=${encodeURIComponent(from)}` +
-          `&to=${encodeURIComponent(to)}` +
-          (userId ? `&userId=${encodeURIComponent(userId)}` : "");
+    registerOcRow(app);
+    setInstrumentDatabase(db);
+    registerFutstkOhlcRoutes(app);
 
-        // Mutate and continue through router stack so the mounted handler catches it
-        req.url = target;
-        next();
-      }
-    );
+    // Legacy alias
+    app.get("/api/orders/triggered", (req: Request, _res: Response, next: NextFunction) => {
+      const origQs = new URLSearchParams(req.url.split("?")[1] || "");
+      const from = origQs.get("from") || "";
+      const to = origQs.get("to") || "";
+      const userId = origQs.get("userId") || "";
+      const target = `/api/trades/list?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}${userId ? `&userId=${encodeURIComponent(userId)}` : ""}`;
+      req.url = target;
+      next();
+    });
 
-    // Misc analytics/data (keep these public if desired)
     AnalysisRoutes(app, db);
     registerNiftyRoutes(app, db);
     cash_dataRoutes(app, db);
@@ -261,21 +472,17 @@ const connectDB = async () => {
     AdvDec(app, db);
     Heatmap(app, db);
 
-    /* ================== Auth gate: from here req.user is required ================== */
+    /* ================== Auth gate ================== */
     app.use(authenticate);
 
-    /* ---- Entitlement-protected namespaces ----
-       DO NOT guard /api/summary here (the public one is already mounted). */
     app.use("/api/journal", requireEntitlement("journaling", "journaling_solo"));
     app.use("/api/daily-journal", requireEntitlement("journaling", "journaling_solo"));
 
-    // Guard your paid datasets
     app.use("/api/fii", requireEntitlement("fii_dii_data"));
     app.use("/api/dii", requireEntitlement("fii_dii_data"));
     app.use("/api/pro", requireEntitlement("fii_dii_data"));
     app.use("/api/main-fii-dii", requireEntitlement("fii_dii_data"));
 
-    /* ---- Authenticated routes ---- */
     app.use("/api", registerTradeJournalRoutes(db));
     app.use("/api/daily-journal", registerDailyJournalRoutes(db));
     app.use("/api/trade-calendar", registerTradeCalendarRoutes(db));
@@ -283,8 +490,9 @@ const connectDB = async () => {
     app.use("/api", routes);
 
     /* ================== Data boot + schedulers ================== */
-    await fetchAndStoreInstruments();
+    await fetchAndStoreInstruments(); // pace inside service if needed
     startMarketQuotePolling();
+    ocWatcherHandle = await startOptionChainWatcher(db);
 
     /* ================== Error handler ================== */
     app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
@@ -295,9 +503,7 @@ const connectDB = async () => {
     const PORT = Number(process.env.PORT) || 8000;
     httpServer.listen(PORT, () => {
       console.log(`🚀 Server running at http://localhost:${PORT}`);
-      console.log(
-        `🔗 Allowed CORS origin: ${process.env.CLIENT_URL || "http://localhost:5173"}`
-      );
+      console.log(`🔗 Allowed CORS origin: ${process.env.CLIENT_URL || "http://localhost:5173"}`);
     });
   } catch (err) {
     console.error("❌ MongoDB connection error:", err);
@@ -309,29 +515,21 @@ connectDB();
 
 /* ================== Socket.IO ================== */
 const io = new SocketIOServer(httpServer, {
-  cors: {
-    origin: process.env.CLIENT_URL || "http://localhost:5173",
-    methods: ["GET", "POST"],
-  },
+  cors: { origin: process.env.CLIENT_URL || "http://localhost:5173", methods: ["GET", "POST"] },
 });
-
 io.on("connection", (socket) => {
   console.log("🔌 New client connected:", socket.id);
-  socket.on("disconnect", (reason) =>
-    console.log(`Client disconnected (${socket.id}):`, reason)
-  );
+  socket.on("disconnect", (reason) => console.log(`Client disconnected (${socket.id}):`, reason));
 });
 
 /* ================== Graceful shutdown ================== */
-process.on("SIGINT", async () => {
+async function shutdown(code = 0) {
   console.log("🛑 Shutting down gracefully...");
-  try {
-    await mongoClient?.close();
-  } catch {}
-  httpServer.close(() => {
-    console.log("✅ Server closed");
-    process.exit(0);
-  });
-});
+  try { ocWatcherHandle?.stop(); } catch {}
+  try { await mongoClient?.close(); } catch {}
+  httpServer.close(() => { console.log("✅ Server closed"); process.exit(code); });
+}
+process.on("SIGINT", () => shutdown(0));
+process.on("SIGTERM", () => shutdown(0));
 
 export { io };

@@ -1,6 +1,4 @@
 // src/utils/time.ts
-// Small helpers to format India Standard Time consistently everywhere.
-
 export function istNowString(): string {
   const now = new Date();
   const parts = new Intl.DateTimeFormat("en-CA", {

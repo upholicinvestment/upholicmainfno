@@ -1,353 +1,158 @@
-import { Express } from 'express';
-import { Db } from 'mongodb';
+// src/api/call_put.ts
+import type { Express, Request, Response, RequestHandler } from "express";
+import type { Db } from "mongodb";
+
+const LOG_ON = (process.env.LOG_ATM ?? "true").toLowerCase() === "true";
+const log  = (...a: any[]) => LOG_ON && console.log("[ATM]", ...a);
+const warn = (...a: any[]) => console.warn("[ATM]", ...a);
+const err  = (...a: any[]) => console.error("[ATM]", ...a);
+
+const iso = (d?: Date | string | number | null) =>
+  d ? new Date(d).toISOString() : null;
 
 export default function registerNiftyRoutes(app: Express, db: Db) {
-  app.get('/api/nifty/atm-strikes-timeline', async (req, res) => {
+  const atmStrikesTimeline: RequestHandler = async (req: Request, res: Response): Promise<void> => {
+    const t0 = Date.now();
     try {
-      const intervalParam = req.query.interval as string || '3';
-      const interval = parseInt(intervalParam, 10); // in minutes
-  
-      const collection = db.collection('all_nse_fno');
-  
-      // Step 1: Try to fetch today’s data
-      const now = new Date();
-      const todayStart = new Date(now.setUTCHours(0, 0, 0, 0));
-      const todayEnd = new Date(todayStart);
-      todayEnd.setUTCDate(todayEnd.getUTCDate() + 1);
-  
-      let dataStart = todayStart;
-      let dataEnd = todayEnd;
-  
-      let docs = await collection.find({
-        security_id: 56785,
-        timestamp: { $gte: todayStart, $lt: todayEnd }
-      }, { projection: { _id: 0, LTP: 1, timestamp: 1 } })
-        .sort({ timestamp: 1 })
-        .toArray();
-  
-      // Step 2: If today is empty, fallback to latest available data date
-      if (docs.length === 0) {
-        const lastEntry = await collection.find({ security_id: 56785 })
-          .sort({ timestamp: -1 })
-          .limit(1)
-          .toArray();
-  
-        if (!lastEntry.length) {
-          res.status(404).json({ error: 'No NIFTY data found in collection' });
-          return;
-        }
-  
-        const lastDate = new Date(lastEntry[0].timestamp);
-        lastDate.setUTCHours(0, 0, 0, 0);
-        const lastEnd = new Date(lastDate);
-        lastEnd.setUTCDate(lastDate.getUTCDate() + 1);
-  
-        dataStart = lastDate;
-        dataEnd = lastEnd;
-  
-        docs = await collection.find({
-          security_id: 56785,
-          timestamp: { $gte: lastDate, $lt: lastEnd }
-        }, { projection: { _id: 0, LTP: 1, timestamp: 1 } })
-          .sort({ timestamp: 1 })
-          .toArray();
-      }
-  
-      const results = [];
-      const intervalMap: Record<string, boolean> = {};
-  
-      for (const doc of docs) {
-        const ts = new Date(doc.timestamp);
-        const ltp = parseFloat(doc.LTP);
-        if (isNaN(ltp)) continue;
-  
-        // Round to nearest interval
-        const rounded = new Date(Math.floor(ts.getTime() / (interval * 60 * 1000)) * (interval * 60 * 1000));
-        const roundedISO = rounded.toISOString();
-  
-        if (!intervalMap[roundedISO]) {
-          intervalMap[roundedISO] = true;
-  
-          const atmStrike = Math.round(ltp / 50) * 50;
-  
-          const windowStart = new Date(rounded);
-          windowStart.setMinutes(windowStart.getMinutes() - interval);
-          const windowEnd = new Date(rounded);
-          windowEnd.setMinutes(windowEnd.getMinutes() + interval);
-  
-          const [optionData, optionData2] = await Promise.all([
-            collection.findOne({
-              strike_price: atmStrike,
-              trading_symbol: { $regex: '^NIFTY-Jun2025' },
-              option_type: "CE",
-              timestamp: { $gte: windowStart, $lt: windowEnd }
-            }, { sort: { timestamp: -1 } }),
-            collection.findOne({
-              strike_price: atmStrike,
-              trading_symbol: { $regex: '^NIFTY-Jun2025' },
-              option_type: "PE",
-              timestamp: { $gte: windowStart, $lt: windowEnd }
-            }, { sort: { timestamp: -1 } }),
-          ]);
-  
-          results.push({
-            atmStrike,
-            niftyLTP: ltp,
-            timestamp: roundedISO,
-            callOI: optionData?.OI ?? null,
-            putOI: optionData2?.OI ?? null,
-            callTimestamp: optionData?.timestamp ?? null,
-            putTimestamp: optionData2?.timestamp ?? null
-          });
-        }
-      }
-  
-      res.json({ atmStrikes: results });
-  
-    } catch (error) {
-      console.error('Error fetching ATM strikes timeline:', error);
-      res.status(500).json({ error: 'Internal server error' });
-    }
-  });
+      const intervalMin = Math.max(1, parseInt((req.query.interval as string) ?? "3", 10));
+      const id  = Number(process.env.OC_UNDERLYING_ID ?? 13);
+      const seg = process.env.OC_SEGMENT ?? "IDX_I";
 
-  app.get('/api/nifty/near5', async (_req, res) => {
-    try {
-      const collection = db.collection('all_nse_fno');
-  
-      // --- Step 1: Determine today’s date range ---
-      const now = new Date();
-      const todayStart = new Date(now.setUTCHours(0, 0, 0, 0));
-      const todayEnd = new Date(todayStart);
-      todayEnd.setUTCDate(todayEnd.getUTCDate() + 1);
-  
-      // --- Step 2: Try to fetch today’s latest NIFTY LTP ---
-      let latestNifty = await collection.find({
-        security_id: 56785,
-        timestamp: { $gte: todayStart, $lt: todayEnd }
-      })
-        .sort({ timestamp: -1 })
+      log("▶ hit /api/nifty/atm-strikes-timeline", { intervalMin, id, seg });
+
+      const ticks = db.collection("option_chain_ticks");
+
+      // 1) latest tick to detect expiry + day window
+      const latest = await ticks
+        .find({ underlying_security_id: id, underlying_segment: seg })
+        .sort({ ts: -1 })
         .limit(1)
         .toArray();
-  
-      // --- Step 3: If today's data missing, fallback to latest available date in DB ---
-      let dataStart = todayStart;
-      let dataEnd = todayEnd;
-  
-      if (!latestNifty.length || !latestNifty[0].LTP) {
-        const lastAvailable = await collection.find({ security_id: 56785 })
-          .sort({ timestamp: -1 })
-          .limit(1)
-          .toArray();
-  
-        if (!lastAvailable.length || !lastAvailable[0].timestamp) {
-          res.status(404).json({ error: 'No historical Nifty LTP found in database' });
-          return;
+
+      if (!latest.length) {
+        warn("no ticks found for underlying/segment; is watcher running?");
+        res.status(404).json({ error: "No option_chain_ticks found for the given underlying." });
+        return;
+      }
+
+      const { expiry, ts: latestTs } = latest[0] as any;
+      log("latest tick", { expiry, latestTs: iso(latestTs) });
+
+      // (UTC) trading day of latest
+      const d = new Date(latestTs);
+      const dayStart = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+      const dayEnd = new Date(dayStart);
+      dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
+      log("date window", { dayStart: iso(dayStart), dayEnd: iso(dayEnd) });
+
+      // 2) fetch all ticks for that day+expiry
+      const docs = await ticks.find(
+        {
+          underlying_security_id: id,
+          underlying_segment: seg,
+          expiry,
+          ts: { $gte: dayStart, $lt: dayEnd },
+        },
+        { projection: { _id: 0, ts: 1, last_price: 1, strikes: 1 } }
+      ).sort({ ts: 1 }).toArray();
+
+      if (!docs.length) {
+        warn("no ticks inside date window for detected expiry");
+        res.status(404).json({ error: "No ticks in date window for detected expiry." });
+        return;
+      }
+
+      log("fetched ticks", {
+        count: docs.length,
+        first: iso(docs[0].ts),
+        last: iso(docs[docs.length - 1].ts),
+      });
+
+      // 3) bin & compute ATM OI
+      const binMs = intervalMin * 60 * 1000;
+      const detectStep = (sample: Array<{ strike: number }>): number => {
+        const arr = Array.from(new Set(sample.map(s => Number(s.strike)).filter(Number.isFinite)))
+          .sort((a, b) => a - b);
+        for (let i = 1; i < arr.length; i++) {
+          const diff = Math.abs(arr[i] - arr[i - 1]);
+          if (diff > 0) return diff;
         }
-  
-        const lastDate = new Date(lastAvailable[0].timestamp);
-        const lastStart = new Date(Date.UTC(lastDate.getUTCFullYear(), lastDate.getUTCMonth(), lastDate.getUTCDate()));
-        const lastEnd = new Date(lastStart);
-        lastEnd.setUTCDate(lastEnd.getUTCDate() + 1);
-  
-        dataStart = lastStart;
-        dataEnd = lastEnd;
-  
-        latestNifty = await collection.find({
-          security_id: 56785,
-          timestamp: { $gte: dataStart, $lt: dataEnd }
-        }).sort({ timestamp: -1 }).limit(1).toArray();
-  
-        if (!latestNifty.length || !latestNifty[0].LTP) {
-          res.status(404).json({ error: 'Failed to fetch LTP even for last available date' });
-          return;
+        return 50;
+      };
+      const roundToStep = (px: number, step: number) => Math.round(px / step) * step;
+
+      let strikeStep = 50;
+      type Bin = { ts: Date; ltp: number; ceOI: number | null; peOI: number | null; callTs: Date | null; putTs: Date | null; };
+      const bins = new Map<number, Bin>();
+
+      // detect step from first doc that has strikes
+      for (const doc of docs) {
+        if (Array.isArray(doc.strikes) && doc.strikes.length) {
+          strikeStep = detectStep(doc.strikes as any);
+          break;
         }
       }
-  
-      // --- Step 4: Determine ATM strike and nearby strikes ---
-      const niftyLTP = parseFloat(latestNifty[0].LTP);
-      const atmStrike = Math.round(niftyLTP / 50) * 50;
-      // const strikePrices = Array.from({ length: 5 }, (_, i) => atmStrike - 100 + i * 50);
-      const strikePrices = Array.from({ length: 11 }, (_, i) => atmStrike - 250 + i * 50);
-  
-      // --- Step 5: Get CE and PE OI data for each strike ---
-      const results = await Promise.all(
-        strikePrices.map(async (strike) => {
-          const CE_docs = await collection.find({
-            strike_price: strike,
-            option_type: "CE",
-            trading_symbol: { $regex: '^NIFTY-Jun2025' },
-            timestamp: { $gte: dataStart, $lt: dataEnd }
-          }).toArray();
-  
-          const PE_docs = await collection.find({
-            strike_price: strike,
-            option_type: "PE",
-            trading_symbol: { $regex: '^NIFTY-Jun2025' },
-            timestamp: { $gte: dataStart, $lt: dataEnd }
-          }).toArray();
-  
-          const groupedByTimestamp: { [key: string]: any } = {};
-  
-          CE_docs.forEach(doc => {
-            const ts = new Date(doc.timestamp).toISOString();
-            if (!groupedByTimestamp[ts]) groupedByTimestamp[ts] = { strike_price: strike };
-            groupedByTimestamp[ts].callOI = doc.OI || 0;
-            groupedByTimestamp[ts].callTimestamp = doc.timestamp;
-          });
-  
-          PE_docs.forEach(doc => {
-            const ts = new Date(doc.timestamp).toISOString();
-            if (!groupedByTimestamp[ts]) groupedByTimestamp[ts] = { strike_price: strike };
-            groupedByTimestamp[ts].putOI = doc.OI || 0;
-            groupedByTimestamp[ts].putTimestamp = doc.timestamp;
-          });
-  
-          return Object.values(groupedByTimestamp);
-        })
-      );
-  
-      const flattened = results.flat();
-  
-      // --- Step 6: Fetch Nifty LTP timeline for the same date ---
-      const niftyDocs = await collection
-        .find({
-          security_id: 56785,
-          timestamp: { $gte: dataStart, $lt: dataEnd }
-        }, { projection: { _id: 0, LTP: 1, timestamp: 1 } })
-        .sort({ timestamp: 1 })
-        .toArray();
-  
-      const nifty = niftyDocs.map(doc => ({
-        value: doc.LTP,
-        timestamp: doc.timestamp,
-      }));
-  
-      // --- Step 7: Include dateUsed for frontend reference ---
-      const dateUsed = dataStart.toISOString().split('T')[0];
-  
-      res.json({ atmStrike, overall: flattened, nifty, dateUsed });
-  
-    } catch (error) {
-      console.error('Error fetching NEAR5:', error);
-      res.status(500).json({ error: 'Internal server error' });
-    }
-  });
+      log("strike step", { strikeStep });
 
+      for (const doc of docs) {
+        const ts = new Date(doc.ts);
+        const ltp = Number(doc.last_price ?? 0);
+        if (!Number.isFinite(ltp) || ltp <= 0) continue;
 
-  app.get('/api/nifty/overall', async (_req, res) => {
-    try {
-      const collection = db.collection('all_nse_fno');
-  
-      // Step 1: Get today's UTC date range
-      const now = new Date();
-      const todayStart = new Date(now.setUTCHours(0, 0, 0, 0));
-      const todayEnd = new Date(todayStart);
-      todayEnd.setUTCDate(todayEnd.getUTCDate() + 1);
-  
-      // Step 2: Try fetching latest NIFTY from today
-      let latestNifty = await collection.find({
-        security_id: 56785,
-        timestamp: { $gte: todayStart, $lt: todayEnd }
-      }).sort({ timestamp: -1 }).limit(1).toArray();
-  
-      let dataStart = todayStart;
-      let dataEnd = todayEnd;
-  
-      // Step 3: If no LTP today, find most recent available date
-      if (!latestNifty.length || !latestNifty[0].LTP) {
-        const lastAvailable = await collection.find({ security_id: 56785 })
-          .sort({ timestamp: -1 })
-          .limit(1)
-          .toArray();
-  
-        if (!lastAvailable.length || !lastAvailable[0].timestamp) {
-          res.status(404).json({ error: 'No NIFTY LTP data available in database' });
-          return;
+        const bkey = Math.floor(ts.getTime() / binMs) * binMs;
+        const atm = roundToStep(ltp, strikeStep);
+
+        let ce: number | null = null, pe: number | null = null;
+        if (Array.isArray(doc.strikes)) {
+          const row = (doc.strikes as any[]).find(s => s?.strike === atm);
+          if (row) {
+            ce = Number(row?.ce?.oi ?? null);
+            pe = Number(row?.pe?.oi ?? null);
+          }
         }
-  
-        const lastDate = new Date(lastAvailable[0].timestamp);
-        const lastStart = new Date(Date.UTC(lastDate.getUTCFullYear(), lastDate.getUTCMonth(), lastDate.getUTCDate()));
-        const lastEnd = new Date(lastStart);
-        lastEnd.setUTCDate(lastEnd.getUTCDate() + 1);
-  
-        dataStart = lastStart;
-        dataEnd = lastEnd;
-  
-        latestNifty = await collection.find({
-          security_id: 56785,
-          timestamp: { $gte: lastStart, $lt: lastEnd }
-        }).sort({ timestamp: -1 }).limit(1).toArray();
-  
-        if (!latestNifty.length || !latestNifty[0].LTP) {
-          res.status(404).json({ error: 'Failed to fetch LTP for most recent available date' });
-          return;
-        }
+
+        bins.set(bkey, {
+          ts,
+          ltp,
+          ceOI: Number.isFinite(ce as any) ? (ce as number) : null,
+          peOI: Number.isFinite(pe as any) ? (pe as number) : null,
+          callTs: ce != null ? ts : null,
+          putTs:  pe != null ? ts : null,
+        });
       }
-  
-      // Step 4: Calculate ATM and 21 strikes (±500 range)
-      const niftyLTP = parseFloat(latestNifty[0].LTP);
-      const atmStrike = Math.round(niftyLTP / 50) * 50;
-      const strikePrices = Array.from({ length: 21 }, (_, i) => atmStrike - 500 + i * 50);
-  
-      // Step 5: For each strike, group OI by timestamp
-      const results = await Promise.all(
-        strikePrices.map(async (strike) => {
-          const CE_docs = await collection.find({
-            strike_price: strike,
-            option_type: "CE",
-            trading_symbol: { $regex: '^NIFTY-Jun2025' },
-            timestamp: { $gte: dataStart, $lt: dataEnd }
-          }).toArray();
-  
-          const PE_docs = await collection.find({
-            strike_price: strike,
-            option_type: "PE",
-            trading_symbol: { $regex: '^NIFTY-Jun2025' },
-            timestamp: { $gte: dataStart, $lt: dataEnd }
-          }).toArray();
-  
-          const groupedByTimestamp: { [key: string]: any } = {};
-  
-          CE_docs.forEach(doc => {
-            const ts = new Date(doc.timestamp).toISOString();
-            if (!groupedByTimestamp[ts]) groupedByTimestamp[ts] = { strike_price: strike };
-            groupedByTimestamp[ts].callOI = doc.OI || 0;
-            groupedByTimestamp[ts].callTimestamp = doc.timestamp;
-          });
-  
-          PE_docs.forEach(doc => {
-            const ts = new Date(doc.timestamp).toISOString();
-            if (!groupedByTimestamp[ts]) groupedByTimestamp[ts] = { strike_price: strike };
-            groupedByTimestamp[ts].putOI = doc.OI || 0;
-            groupedByTimestamp[ts].putTimestamp = doc.timestamp;
-          });
-  
-          return Object.values(groupedByTimestamp);
-        })
-      );
-  
-      const flattened = results.flat();
-  
-      // Step 6: Fetch NIFTY LTP timeline
-      const niftyDocs = await collection.find({
-        security_id: 56785,
-        timestamp: { $gte: dataStart, $lt: dataEnd }
-      }, {
-        projection: { _id: 0, LTP: 1, timestamp: 1 }
-      }).sort({ timestamp: 1 }).toArray();
-  
-      const nifty = niftyDocs.map(doc => ({
-        value: doc.LTP,
-        timestamp: doc.timestamp
-      }));
-  
-      const dateUsed = dataStart.toISOString().split('T')[0];
-  
-      res.json({ atmStrike, overall: flattened, nifty, dateUsed });
-  
-    } catch (error) {
-      console.error('Error fetching OVERALL:', error);
-      res.status(500).json({ error: 'Internal server error' });
+
+      if (!bins.size) {
+        warn("no bins computed from ticks");
+        res.status(404).json({ error: "No bins computed from ticks." });
+        return;
+      }
+
+      const result = Array.from(bins.entries())
+        .sort((a, b) => a[0] - b[0])
+        .map(([epoch, v]) => {
+          const atmStrike = Math.round(v.ltp / strikeStep) * strikeStep;
+          return {
+            atmStrike,
+            niftyLTP: v.ltp,
+            timestamp: iso(epoch)!,
+            callOI: v.ceOI,
+            putOI: v.peOI,
+            callTimestamp: iso(v.callTs),
+            putTimestamp: iso(v.putTs),
+          };
+        });
+
+      log("bins summary", { bins: bins.size, first: result[0], last: result[result.length - 1] });
+      log("done in ms", Date.now() - t0);
+
+      res.json({ expiry, step: strikeStep, atmStrikes: result });
+      return;
+    } catch (e: any) {
+      err("handler error", e?.message || e);
+      res.status(500).json({ error: "Internal server error" });
+      return;
     }
-  });
+  };
+
+  app.get("/api/nifty/atm-strikes-timeline", atmStrikesTimeline);
 }

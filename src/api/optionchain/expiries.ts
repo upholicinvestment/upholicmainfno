@@ -1,4 +1,4 @@
-// server/src/optionchain/expiries.ts
+// src/optionchain/expiries.ts
 import { Express, Request, Response, Router } from "express";
 import { Db } from "mongodb";
 import { fetchExpiryList } from "../../services/option_chain";

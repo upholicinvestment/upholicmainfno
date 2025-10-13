@@ -46,8 +46,8 @@ const oidFrom = (ns: string) => {
         hasVariants: false,
         forSale: true,
         route: "/dashboard",
-        priceMonthly: Number(process.env.BUNDLE_MONTHLY_PRICE ?? 499),   //499
-        priceYearly: Number(process.env.BUNDLE_YEARLY_PRICE ?? 4999),    //4999
+        priceMonthly: Number(process.env.BUNDLE_MONTHLY_PRICE ?? 1),   //499
+        priceYearly: Number(process.env.BUNDLE_YEARLY_PRICE ?? 2),    //4999
         components: [
           // "technical_scanner",
           // "fundamental_scanner",
@@ -124,8 +124,8 @@ const oidFrom = (ns: string) => {
         hasVariants: false,
         forSale: true,
         route: "/journal",
-        priceMonthly: Number(process.env.JOURNALING_SOLO_MONTHLY_PRICE ?? 299),    //299
-        priceYearly: Number(process.env.JOURNALING_SOLO_YEARLY_PRICE ?? 2499),      //2499
+        priceMonthly: Number(process.env.JOURNALING_SOLO_MONTHLY_PRICE ?? 1),    //299
+        priceYearly: Number(process.env.JOURNALING_SOLO_YEARLY_PRICE ?? 2),      //2499
       },
     ];
 
@@ -155,7 +155,7 @@ const oidFrom = (ns: string) => {
         key: "starter",
         name: "Starter Scalping",
         description: "Beginner-friendly scalping suite",
-        priceMonthly: 5999,  //5999
+        priceMonthly: 1,  //5999
         interval: "monthly",
         isActive: true,
       },
@@ -165,7 +165,7 @@ const oidFrom = (ns: string) => {
         key: "pro",
         name: "Option Scalper PRO",
         description: "Advanced option scalping engine",
-        priceMonthly: 14999,   //14999
+        priceMonthly: 1,   //14999
         interval: "monthly",
         isActive: true,
       },
@@ -175,7 +175,7 @@ const oidFrom = (ns: string) => {
         key: "swing",
         name: "Sniper Algo",
         description: "Sniper trading strategy system",
-        priceMonthly: 9999,   //9999
+        priceMonthly: 1,   //9999
         interval: "monthly",
         isActive: true,
       },

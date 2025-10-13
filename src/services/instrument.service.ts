@@ -1,23 +1,26 @@
 import axios from "axios";
 import { Db } from "mongodb";
 import csvParser from "csv-parser";
-import { Readable } from "stream"; // Import Readable for stream typing
+import { Readable } from "stream";
 
-let db: Db;
+let db: Db | null = null;
 
 export const setInstrumentDatabase = (database: Db) => {
   db = database;
+  // helpful indexes (idempotent)
+  db.collection("instruments").createIndex({ security_id: 1 }, { unique: true }).catch(() => {});
+  db.collection("instruments").createIndex({ trading_symbol: 1 }).catch(() => {});
 };
 
 /**
- * Fetch and store instrument metadata from Dhan Scrip Master CSV
+ * Fetch and store instrument metadata from Dhan Scrip Master CSV (public CDN).
  */
 export const fetchAndStoreInstruments = async () => {
   try {
     console.log("📡 Fetching instrument master from Dhan...");
     const response = await axios.get(
       "https://images.dhan.co/api-data/api-scrip-master-detailed.csv",
-      { responseType: "stream" }
+      { responseType: "stream", timeout: 30000 }
     );
 
     const dataStream = response.data as Readable;
@@ -28,10 +31,10 @@ export const fetchAndStoreInstruments = async () => {
         .pipe(csvParser())
         .on("data", (row: any) => {
           instruments.push({
-            security_id: parseInt(row["SECURITY_ID"] || "0"),
+            security_id: parseInt(row["SECURITY_ID"] || "0", 10),
             trading_symbol: row["SYMBOL_NAME"] || "",
-            instrument_type: row["INSTRUMENT"] || "", // Updated
-            expiry_date: row["SM_EXPIRY_DATE"] || null, // Updated
+            instrument_type: row["INSTRUMENT"] || "",
+            expiry_date: row["SM_EXPIRY_DATE"] || null,
             strike_price: parseFloat(row["STRIKE_PRICE"] || "0"),
             option_type: row["OPTION_TYPE"] || "",
             expiry_flag: row["EXPIRY_FLAG"] || "",
@@ -43,7 +46,9 @@ export const fetchAndStoreInstruments = async () => {
 
     if (!db) throw new Error("Database not initialized");
     await db.collection("instruments").deleteMany({});
-    await db.collection("instruments").insertMany(instruments);
+    if (instruments.length > 0) {
+      await db.collection("instruments").insertMany(instruments, { ordered: false });
+    }
 
     console.log(`💾 Saved ${instruments.length} instruments to DB.`);
   } catch (err) {

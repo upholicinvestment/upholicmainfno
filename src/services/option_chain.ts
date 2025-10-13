@@ -1,4 +1,6 @@
+// src/services/option_chain.ts
 import axios from "axios";
+import { scheduleOC } from "../utils/dhanPacer";
 
 /* ========= Env / headers ========= */
 const DHAN_ACCESS_TOKEN = process.env.DHAN_API_KEY || "";
@@ -46,7 +48,7 @@ function istToday(): string {
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(new Date());
-  const map = Object.fromEntries(parts.map(p => [p.type, p.value]));
+  const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
   return `${map.year}-${map.month}-${map.day}`;
 }
 
@@ -58,17 +60,44 @@ export function pickNearestExpiry(expiries: string[]): string | null {
   return sorted[sorted.length - 1] ?? null;
 }
 
-/* ========= API calls ========= */
+/* ========= Pacer-aware retry (OC bucket) ========= */
+async function ocRetry<T>(fn: () => Promise<T>, tries = 4): Promise<T> {
+  let lastErr: any;
+  for (let i = 0; i < tries; i++) {
+    try {
+      // Every attempt goes through OC bucket schedule
+      return await scheduleOC(fn);
+    } catch (e: any) {
+      lastErr = e;
+      const status = e?.response?.status;
+      if (status === 429 || (status >= 500 && status < 600)) {
+        // gentle exponential backoff on top of bucket pacing
+        const wait = Math.min(15000, 1000 * Math.pow(2, i)); // 1s,2s,4s,8s
+        console.warn(`⏳ OptionChain (${status}) retry in ${wait}ms...`);
+        await sleep(wait);
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+
+/* ========= API calls (OC bucket + retry) ========= */
 export async function fetchExpiryList(
   UnderlyingScrip: number,
   UnderlyingSeg: string
 ): Promise<string[]> {
   requireEnv();
   try {
-    const res = await axios.post(
-      "https://api.dhan.co/v2/optionchain/expirylist",
-      { UnderlyingScrip, UnderlyingSeg },
-      { headers: dhanHeaders(), timeout: 10000 }
+    const res = await ocRetry(
+      () =>
+        axios.post(
+          "https://api.dhan.co/v2/optionchain/expirylist",
+          { UnderlyingScrip, UnderlyingSeg },
+          { headers: dhanHeaders(), timeout: 10000 }
+        ),
+      3
     );
     const dates: string[] = res.data?.data || [];
     console.log(`📅 expiries: ${dates.length}`);
@@ -86,10 +115,14 @@ export async function fetchOptionChainRaw(
   Expiry: string
 ): Promise<DhanOCResponse> {
   requireEnv();
-  const res = await axios.post(
-    "https://api.dhan.co/v2/optionchain",
-    { UnderlyingScrip, UnderlyingSeg, Expiry },
-    { headers: dhanHeaders(), timeout: 15000 }
+  const res = await ocRetry(
+    () =>
+      axios.post(
+        "https://api.dhan.co/v2/optionchain",
+        { UnderlyingScrip, UnderlyingSeg, Expiry },
+        { headers: dhanHeaders(), timeout: 15000 }
+      ),
+    4
   );
   return { data: res.data?.data ?? { last_price: 0, oc: {} } };
 }
@@ -106,7 +139,8 @@ export async function getLiveOptionChain(
     const picked = pickNearestExpiry(expiries);
     if (!picked) throw new Error("No expiry available.");
     expiry = picked;
-    await sleep(3100); // 1 call / 3s
+    // polite pause between list → chain (doesn't count against OC bucket pacing)
+    await sleep(3100);
   }
   const { data } = await fetchOptionChainRaw(UnderlyingScrip, UnderlyingSeg, expiry);
   return { expiry, data };

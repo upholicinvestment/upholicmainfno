@@ -2,6 +2,7 @@
 import express, { Request, Response, NextFunction, Express } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import compression from "compression"; // ✅ NEW
 import { MongoClient, Db } from "mongodb";
 import { createServer } from "http";
 import { Server as SocketIOServer } from "socket.io";
@@ -101,6 +102,10 @@ import registerFutstkOhlcRoutes from "./api/futstk_ohlc.api";
 /* ---------- GEX cache (Mongo-backed) ---------- */
 import gexCacheRouter from "./routes/gex_cache.routes";
 import { setGexCacheDb } from "./controllers/gex_cache.controller";
+
+/* ---------- NEW: OC rows cache materializer & bulk endpoint ---------- */
+import { startOcRowsMaterializer, ensureOcRowsIndexes } from "./services/oc_rows_cache";
+import registerOcRowsBulk from "./api/oc_rows_bulk.api"; // ✅ NEW
 
 dotenv.config();
 
@@ -273,7 +278,7 @@ async function startOptionChainWatcher(db: Db): Promise<OcWatcherHandle> {
       const ts = new Date();
       const ts_ist = istTimestamp(ts);
 
-      if (!expiry) return; // guard (shouldn't happen, but keep TS happy)
+      if (!expiry) return; // guard
       const { data } = await fetchOptionChainRaw(id, seg, expiry); // paced inside service
       const norm = toNormalizedArray(data.oc);
 
@@ -373,6 +378,7 @@ const app: Express = express();
 const httpServer = createServer(app);
 
 app.use(cors({ origin: process.env.CLIENT_URL || "http://localhost:5173", credentials: true }));
+app.use(compression()); // ✅ NEW: gzip/brotli
 app.use(express.json());
 
 /* ================== Global DB refs ================== */
@@ -487,6 +493,8 @@ startWsIfOpen();
 
 /* ================== DB connect + server start ================== */
 let ocWatcherHandle: OcWatcherHandle | null = null;
+/* NEW: keep a ref to the OC rows materializer interval so we can clear it on shutdown */
+let ocRowsTimer: NodeJS.Timeout | null = null;
 
 const connectDB = async () => {
   try {
@@ -494,9 +502,12 @@ const connectDB = async () => {
       throw new Error("❌ Missing MongoDB URI or DB Name in .env");
     }
 
-    mongoClient = new MongoClient(process.env.MONGO_URI);
+    const mongoUri = process.env.MONGO_URI;
+    const mongoDbName = process.env.MONGO_DB_NAME;
+
+    mongoClient = new MongoClient(mongoUri);
     await mongoClient.connect();
-    db = mongoClient.db(process.env.MONGO_DB_NAME);
+    db = mongoClient.db(mongoDbName);
     console.log("✅ Connected to MongoDB");
 
     /* ---- Inject DB into modules ---- */
@@ -510,7 +521,7 @@ const connectDB = async () => {
     setRequireEntitlementDb(db);
     setGexCacheDb(db);
 
-    // Helpful OC indexes & sample logs
+    // Helpful OC indexes & logs (optional)
     try {
       const oc = db.collection("option_chain");
       await oc.createIndexes([
@@ -544,7 +555,6 @@ const connectDB = async () => {
       console.warn("option_chain index/log skipped:", (e as any)?.message || e);
     }
 
-    // Ticks indexes & log
     try {
       const ticks = db.collection("option_chain_ticks");
       await ticks.createIndexes([
@@ -558,6 +568,14 @@ const connectDB = async () => {
       console.log("option_chain_ticks count:", tickCount);
     } catch (e) {
       console.warn("option_chain_ticks index/log skipped:", (e as any)?.message || e);
+    }
+
+    // ✅ Ensure cache indexes for oc_rows_cache
+    try {
+      await ensureOcRowsIndexes(db);
+      console.log("✅ oc_rows_cache indexes ensured");
+    } catch (e) {
+      console.warn("oc_rows_cache index ensure skipped:", (e as any)?.message || e);
     }
 
     // Mount GEX cache router (canonical + alias)
@@ -586,7 +604,9 @@ const connectDB = async () => {
     registerOptionChainExpiries(app, db);
     registerOptionChainSnapshot(app, db);
 
+    // OC Row APIs (includes cached and materialize endpoints)
     registerOcRow(app);
+    registerOcRowsBulk(app, db); // ✅ NEW bulk cached endpoint
     setInstrumentDatabase(db);
     registerFutstkOhlcRoutes(app);
 
@@ -636,9 +656,28 @@ const connectDB = async () => {
 
     /* ================== Data boot + schedulers ================== */
     await fetchAndStoreInstruments();
-    startMarketQuotePolling();
+    // startMarketQuotePolling(); // optional
     startFutstkOhlcRefresher(); // reads FUTSTK_REFRESH_* from .env
     ocWatcherHandle = await startOptionChainWatcher(db);
+
+    // 🚀 Start the OC rows cache materializer (keeps 3/5/15/30m buckets hot; 24h backfill)
+    try {
+      ocRowsTimer = startOcRowsMaterializer({
+        mongoUri,
+        dbName: mongoDbName,
+        underlyings: [
+          { id: Number(process.env.OC_UNDERLYING_ID || 13), segment: process.env.OC_SEGMENT || "IDX_I" },
+        ],
+        intervals: [3, 5, 15, 30],
+        sinceMs: 24 * 60 * 60 * 1000, // 24 hours
+        scheduleMs: 60_000,           // run every minute
+        mode: "level",
+        unit: "bps",
+      });
+      console.log("✅ OC rows materializer started (24h backfill)");
+    } catch (e) {
+      console.warn("⚠️ Failed to start OC rows materializer:", (e as any)?.message || e);
+    }
 
     /* ================== Error handler ================== */
     app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
@@ -673,6 +712,9 @@ async function shutdown(code = 0) {
   console.log("🛑 Shutting down gracefully...");
   try {
     ocWatcherHandle?.stop();
+  } catch {}
+  try {
+    if (ocRowsTimer) clearInterval(ocRowsTimer);
   } catch {}
   try {
     await mongoClient?.close();

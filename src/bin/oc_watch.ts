@@ -68,7 +68,7 @@ function sum<T>(arr: T[], f: (x: T) => number) { return arr.reduce((a, x) => a +
   const windowSteps = Number(process.env.OC_WINDOW_STEPS || 15);
   const pcrSteps = Number(process.env.OC_PCR_STEPS || 3);
 
-  let expiry = process.env.OC_EXPIRY || "";
+  let expiry = (process.env.OC_EXPIRY || "").trim();
 
   // Resolve expiry once at start
   if (!expiry) {
@@ -80,12 +80,19 @@ function sum<T>(arr: T[], f: (x: T) => number) { return arr.reduce((a, x) => a +
         await sleep(3100); // polite pause before first /optionchain
       } else {
         const res = await getLiveOptionChain(id, seg);
-        expiry = res.expiry;
+        expiry = res.expiry ?? expiry; // keep as-is if null
       }
     } catch {
       const res = await getLiveOptionChain(id, seg);
-      expiry = res.expiry;
+      expiry = res.expiry ?? expiry;   // keep as-is if null
     }
+  }
+
+  // Strong guard so we never call the API with an empty expiry
+  if (!expiry) {
+    throw new Error(
+      "Unable to resolve an expiry. Set OC_EXPIRY in .env or ensure Dhan returns a valid expiry."
+    );
   }
 
   console.log(`▶️  Live Option Chain for ${sym} ${id}/${seg} @ expiry ${expiry}`);
@@ -113,7 +120,7 @@ function sum<T>(arr: T[], f: (x: T) => number) { return arr.reduce((a, x) => a +
             expiry,
             last_price: data.last_price,
             strikes: norm,
-            updated_at: ts,       // UTC Date (keep)
+            updated_at: ts,         // UTC Date (keep)
             updated_at_ist: ts_ist, // display helper
           },
         },

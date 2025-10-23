@@ -39,7 +39,7 @@ function normalizeTradeDate(dateStr: string | undefined | null): string {
   return dateStr.slice(0, 10);
 }
 
-export default function registerTradeJournalRoutes(db: Db) {
+export default function registerTradeJournalRoutes(app: unknown, db: Db) {
   const router = Router();
   const lastStatsByUser = new Map<string, Stats>();
 

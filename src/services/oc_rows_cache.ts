@@ -216,7 +216,8 @@ async function dropLegacyOcRowsIndexes(db: Db) {
       if (hasBucketKey || legacyName) {
         try {
           await coll.dropIndex(name);
-          if (VERBOSE) console.log(`[oc_rows_cache] Dropped legacy index: ${name}`);
+          if (VERBOSE) 
+            console.log(`[oc_rows_cache] Dropped legacy index: ${name}`);
         } catch (e: any) {
           console.warn(`[oc_rows_cache] Failed dropping index ${name}:`, e?.message || e);
         }
@@ -347,9 +348,9 @@ export async function materializeOcRowsOnce(args: {
         rowsOut = rows;
         tickCount = tc;
         if (VERBOSE) {
-          console.log(
-            `[oc_rows_cache] try base window: expiry=${expiry} interval=${intervalMin}m since=${usedSince.toISOString()} ticks=${tickCount} rows=${rowsOut.length}`
-          );
+          // console.log(
+          //   `[oc_rows_cache] try base window: expiry=${expiry} interval=${intervalMin}m since=${usedSince.toISOString()} ticks=${tickCount} rows=${rowsOut.length}`
+          // );
         }
       }
 
@@ -368,9 +369,9 @@ export async function materializeOcRowsOnce(args: {
             unitStore: unit,
           });
           if (VERBOSE) {
-            console.log(
-              `[oc_rows_cache] fallback window: expiry=${expiry} interval=${intervalMin}m since=${trySince.toISOString()} ticks=${tc} rows=${rows.length}`
-            );
+            // console.log(
+            //   `[oc_rows_cache] fallback window: expiry=${expiry} interval=${intervalMin}m since=${trySince.toISOString()} ticks=${tc} rows=${rows.length}`
+            // );
           }
           if (rows.length > 0) {
             rowsOut = rows;
@@ -422,9 +423,9 @@ export async function materializeOcRowsOnce(args: {
       const upserts = (res.modifiedCount ?? 0) + (res.upsertedCount ?? 0);
 
       if (VERBOSE) {
-        console.log(
-          `[oc_rows_cache] upserted=${upserts} (interval=${intervalMin}m, ticks=${tickCount}, since=${usedSince.toISOString()})`
-        );
+        // console.log(
+          // `[oc_rows_cache] upserted=${upserts} (interval=${intervalMin}m, ticks=${tickCount}, since=${usedSince.toISOString()})`
+        // );
       }
 
       results[intervalMin] = upserts;
@@ -471,7 +472,7 @@ export function startOcRowsMaterializer(opts: {
           mode,
           unit,
         });
-        console.log("⛏️ oc_rows_cache initial fill:", { underlying: u.id, res });
+        // console.log("⛏️ oc_rows_cache initial fill:", { underlying: u.id, res });
       } catch (e: any) {
         console.warn("oc_rows_cache initial fill error:", e?.message || e);
       }
@@ -491,7 +492,7 @@ export function startOcRowsMaterializer(opts: {
           mode,
           unit,
         });
-        console.log("⛏️ oc_rows_cache sweep:", { underlying: u.id, res });
+        // console.log("⛏️ oc_rows_cache sweep:", { underlying: u.id, res });
       } catch (e: any) {
         console.warn("oc_rows_cache sweep error:", e?.message || e);
       }

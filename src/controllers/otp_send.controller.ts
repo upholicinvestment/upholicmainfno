@@ -1,3 +1,4 @@
+// src/controllers/otp_send.controller.ts
 import https from "https";
 import { RequestHandler } from "express";
 
@@ -12,7 +13,8 @@ const SMS_CONFIG = {
   API_KEY: process.env.SMS_API_KEY || "",
   SENDER_ID: process.env.SMS_SENDER_ID || "UPOHTC", // exactly 6 chars
   BASE_URL: "https://www.smsgatewayhub.com/api/mt/SendSMS",
-  DLT_TEMPLATE_ID: process.env.SMS_DLT_TEMPLATE_ID_SIGNUP || "1707175767028337759",
+  DLT_TEMPLATE_ID:
+    process.env.SMS_DLT_TEMPLATE_ID_SIGNUP || "1707175767028337759",
   DLT_ENTITY_ID: process.env.SMS_DLT_ENTITY_ID || "1701174893649845477",
   ROUTE_ID: process.env.SMS_ROUTE_ID || "1",
   DEBUG: String(process.env.SMS_DEBUG_FORCE_LOG || "").toLowerCase() === "true",
@@ -49,9 +51,11 @@ const sendSms = async (phone: string, message: string): Promise<boolean> => {
   const url = `${SMS_CONFIG.BASE_URL}?${qs.toString()}`;
   if (SMS_CONFIG.DEBUG) {
     const masked = SMS_CONFIG.API_KEY.replace(/.(?=.{3})/g, "•");
-    console.log("[SMS DEBUG][Signup]",
+    console.log(
+      "[SMS DEBUG][Signup]",
       url.replace(SMS_CONFIG.API_KEY, masked),
-      "\nText:", message
+      "\nText:",
+      message
     );
   }
 
@@ -86,7 +90,10 @@ export const sendOtp: RequestHandler = async (req, res): Promise<void> => {
     if (phone.length !== 10) {
       res
         .status(400)
-        .json({ success: false, message: "Invalid phone number. Use 10 digits only." });
+        .json({
+          success: false,
+          message: "Invalid phone number. Use 10 digits only.",
+        });
       return;
     }
 
@@ -98,7 +105,10 @@ export const sendOtp: RequestHandler = async (req, res): Promise<void> => {
       if (timeLeft > OTP_CONFIG.EXPIRY_SECONDS - 60) {
         res
           .status(429)
-          .json({ success: false, message: "Please wait before requesting a new OTP." });
+          .json({
+            success: false,
+            message: "Please wait before requesting a new OTP.",
+          });
         return;
       }
     }
@@ -135,6 +145,10 @@ export const sendOtp: RequestHandler = async (req, res): Promise<void> => {
   } catch (error: any) {
     res
       .status(500)
-      .json({ success: false, message: "Internal server error", error: error.message });
+      .json({
+        success: false,
+        message: "Internal server error",
+        error: error.message,
+      });
   }
 };

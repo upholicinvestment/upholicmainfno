@@ -168,7 +168,7 @@ function groupBy<T>(arr: T[], key: (t: T) => string) {
 
 /* ================== ROUTES ================== */
 
-export default function registerDailyJournalRoutes(db: Db) {
+export default function registerDailyJournalRoutes(app: express.Express, db: Db) {
   const router = express.Router();
 
   // GET plan for a date (per-user)

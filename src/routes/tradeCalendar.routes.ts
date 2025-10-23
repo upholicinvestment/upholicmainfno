@@ -10,7 +10,7 @@ function monthRangeStrings(year: number, month1to12: number) {
   return { startStr, endStr };
 }
 
-export default function registerTradeCalendarRoutes(db: Db): Router {
+export default function registerTradeCalendarRoutes(app: unknown, db: Db): Router {
   const router = Router();
   const col = db.collection("journal_day_stats");
 

@@ -109,8 +109,11 @@ import {
   ensureOcRowsIndexes,
 } from "./services/oc_rows_cache";
 import registerOcRowsBulk from "./api/oc_rows_bulk.api"; // ✅ NEW
-import { GexLevelsCalc,startGexLevelsEveryMinute } from "./api/gexLevelsCalc";
+import { GexLevelsCalc, startGexLevelsEveryMinute } from "./api/gexLevelsCalc";
 import { AdvDecSave, startAdvDecMinuteJob } from "./api/advdecSave";
+
+/* ---------- OTP in-memory store (for /api/ads OTP check) ---------- */
+import { otpStore } from "./controllers/otp_send.controller";
 
 dotenv.config();
 
@@ -171,7 +174,7 @@ type OcWatcherHandle = { stop: () => void };
 
 async function startOptionChainWatcher(db: Db): Promise<OcWatcherHandle> {
   if ((process.env.OC_DISABLED || "false").toLowerCase() === "true") {
-    console.log("⏸️  [OC] watcher disabled by env OC_DISABLED=true");
+    // console.log("⏸️  [OC] watcher disabled by env OC_DISABLED=true");
     return { stop: () => {} };
   }
 
@@ -424,47 +427,6 @@ let mongoClient: MongoClient;
 /* ================== Symbols for market quote polling ================== */
 const securityIds = [
   40072, 40073, 40074, 40075, 40847, 40848, 42359, 42360, 42361, 42362, 42363,
-  42364, 42365, 42366, 42367, 42368, 42369, 42370, 42371, 42372, 42373, 42374,
-  42379, 42380, 42381, 42382, 42383, 42384, 42385, 42386, 42387, 42388, 42389,
-  42390, 42391, 42392, 42393, 42394, 42395, 42396, 42397, 42398, 42399, 42400,
-  42401, 42402, 42405, 42406, 42407, 42408, 42409, 42410, 42413, 42416, 42417,
-  42418, 42419, 42420, 42421, 42422, 42423, 42424, 42425, 42426, 42427, 42428,
-  42429, 42430, 42431, 42432, 42433, 42434, 42439, 42442, 42443, 42444, 42445,
-  42449, 42450, 42452, 42453, 42456, 42457, 42458, 42459, 42460, 42461, 42472,
-  42473, 42474, 42475, 42478, 42479, 42480, 42481, 42482, 42483, 42484, 42485,
-  42486, 42487, 42488, 42489, 42490, 42491, 42492, 42495, 42496, 42497, 42498,
-  42499, 42500, 42501, 42502, 42503, 42504, 42505, 42506, 42507, 42508, 42509,
-  42516, 42517, 42522, 42523, 42524, 42525, 42526, 42527, 42528, 42529, 42530,
-  42531, 42532, 42533, 42534, 42535, 42536, 42537, 42538, 42539, 42540, 42541,
-  42542, 42543, 42544, 42547, 42549, 42550, 42553, 42554, 42557, 42558, 42564,
-  42565, 42574, 42575, 42576, 42577, 42582, 42583, 42584, 42585, 42586, 42587,
-  42588, 42589, 42590, 42591, 42594, 42595, 42596, 42597, 42600, 42601, 42602,
-  42603, 42604, 42605, 42606, 42607, 42608, 42609, 42612, 42613, 42614, 42615,
-  42616, 42617, 42620, 42622, 42626, 42627, 42628, 42629, 42630, 42631, 42632,
-  42633, 42640, 42641, 42644, 42645, 42646, 42647, 42648, 42649, 42650, 42651,
-  42652, 42653, 42656, 42657, 42660, 42661, 42666, 42667, 42668, 42669, 42670,
-  42671, 42672, 42673, 42676, 42677, 42678, 42679, 42684, 42685, 42686, 42687,
-  42690, 42691, 42692, 42693, 42694, 42695, 42702, 42703, 42704, 42705, 42706,
-  42707, 42709, 42711, 42712, 42713, 42714, 42715, 42716, 42717, 42718, 42719,
-  42720, 42721, 42722, 42723, 42724, 42725, 42730, 42731, 42732, 42733, 42734,
-  42735, 42738, 42739, 42740, 42741, 42742, 42743, 42744, 42745, 42748, 42749,
-  42752, 42753, 42754, 42755, 42756, 42757, 42758, 42759, 42760, 42761, 42762,
-  42763, 42766, 42767, 42768, 42769, 42770, 42771, 42772, 42773, 42774, 42775,
-  42776, 42777, 42780, 42781, 42782, 42783, 42784, 42785, 42786, 42787, 42792,
-  42793, 42796, 42797, 42798, 42799, 42800, 42801, 42806, 42807, 42808, 42809,
-  42810, 42811, 42816, 42817, 42820, 42821, 42822, 42823, 42824, 42825, 42826,
-  42827, 42828, 42829, 42830, 42831, 42832, 42833, 42834, 42835, 42836, 42837,
-  42838, 42839, 42840, 42841, 42844, 42845, 42846, 42847, 42852, 42853, 42854,
-  42855, 42856, 42857, 42860, 42861, 42864, 42865, 42866, 42867, 42868, 42869,
-  42870, 42871, 42874, 42875, 42876, 42877, 42880, 42881, 42888, 42889, 42890,
-  42891, 42892, 42893, 42902, 42903, 42904, 42905, 42906, 42907, 42908, 42909,
-  42910, 42911, 42912, 42913, 42918, 42919, 42922, 42923, 42926, 42927, 42932,
-  42933, 42934, 42935, 42936, 42937, 42938, 42939, 42940, 42941, 42948, 42949,
-  42950, 42951, 42952, 42953, 42954, 42955, 42956, 42957, 42958, 42959, 42960,
-  42961, 42962, 42963, 42964, 42965, 42966, 42967, 42968, 42969, 42970, 43694,
-  43695, 43696, 43697, 44028, 44029, 44043, 44048, 44797, 44798, 44799, 44804,
-  44805, 44806, 45052, 45053, 47991, 47992, 47993, 47994, 47995, 47996, 47997,
-  47998, 64615, 64616,
 ];
 
 const QUOTE_BASE_MIN = 3000;
@@ -654,7 +616,7 @@ const connectDB = async () => {
     // ✅ Ensure cache indexes for oc_rows_cache
     try {
       await ensureOcRowsIndexes(db);
-      console.log("✅ oc_rows_cache indexes ensured");
+      // console.log("✅ oc_rows_cache indexes ensured");
     } catch (e) {
       console.warn(
         "oc_rows_cache index ensure skipped:",
@@ -724,7 +686,59 @@ const connectDB = async () => {
     AdvDec(app, db);
     Heatmap(app, db);
 
+    // 🔓 PUBLIC admin routes (leave here if intended public)
     app.use("/api/admin", registerAdminRoutes(db));
+
+    /* ---------- PUBLIC: /api/ads with OTP verification ---------- */
+    app.post("/api/ads", async (req: Request, res: Response) => {
+      try {
+        const { firstName, lastName, phone, message, otp } = req.body || {};
+        const digits = String(phone || "").replace(/\D/g, "");
+        if (!String(firstName || "").trim() || !String(lastName || "").trim()) {
+          res.status(400).json({ error: "First and last name are required" });
+          return;
+        }
+        if (digits.length !== 10) {
+          res.status(400).json({ error: "Phone must be 10 digits" });
+          return;
+        }
+
+        const rec = otpStore[digits];
+        if (!rec) {
+          res.status(401).json({ error: "No OTP request found for this number" });
+          return;
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+        if (rec.expiresAt < now) {
+          delete otpStore[digits];
+          res.status(410).json({ error: "OTP expired. Please request a new one." });
+          return;
+        }
+
+        const ok = rec.verified || String(rec.otp) === String(otp || "");
+        if (!ok) {
+          res.status(401).json({ error: "OTP not verified / incorrect" });
+          return;
+        }
+
+        // Consume OTP to prevent reuse
+        delete otpStore[digits];
+
+        await db.collection("ads").insertOne({
+          firstName: String(firstName).trim(),
+          lastName: String(lastName).trim(),
+          phone: digits,
+          message: String(message || "").trim(),
+          createdAt: new Date(),
+        });
+
+        res.json({ success: true, message: "Enquiry submitted" });
+      } catch (e: any) {
+        console.error("POST /api/ads error:", e?.message || e);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    });
 
     /* ================== Auth gate ================== */
     app.use(authenticate);
@@ -743,9 +757,11 @@ const connectDB = async () => {
     app.use("/api/pro", requireEntitlement("fii_dii_data"));
     app.use("/api/main-fii-dii", requireEntitlement("fii_dii_data"));
 
-    app.use("/api", registerTradeJournalRoutes(db));
-    app.use("/api/daily-journal", registerDailyJournalRoutes(db));
-    app.use("/api/trade-calendar", registerTradeCalendarRoutes(db));
+    // ✅ Call these register functions directly (do NOT pass them to app.use)
+    registerTradeJournalRoutes(app, db);
+    registerDailyJournalRoutes(app, db);
+    registerTradeCalendarRoutes(app, db);
+
     app.use("/api/users", userRoutes);
     app.use("/api", routes);
 

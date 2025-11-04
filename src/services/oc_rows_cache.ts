@@ -8,7 +8,6 @@ type Unit = "bps" | "pct" | "points";
 
 type TickDoc = {
   underlying_security_id: number;
-  underlying_segment?: string;
   underlying_symbol?: string;
   expiry: string;
   last_price?: number;
@@ -23,18 +22,15 @@ type TickDoc = {
 
 type CacheDoc = {
   underlying_security_id: number;
-  underlying_segment: string;
   expiry: string;
   intervalMin: number;
   mode: Mode;
   unit: Unit;
-  tsBucket: Date;         // canonical bucket key
   time: string;           // "HH:MM:SS IST"
   volatility: number;
   signal: Signal;
   spot: number;
-  created_at: Date;
-  updated_at: Date;
+  date?: string;          // IST date string "YYYY-MM-DD"
 };
 
 const TICKS_COLL = process.env.OC_SOURCE_COLL || "option_chain_ticks";
@@ -62,13 +58,17 @@ function istMidnight(date: Date): Date {
   istDate.setHours(0, 0, 0, 0);
   return istDate;
 }
+function istDateISO(d: Date): string {
+  // Returns YYYY-MM-DD for the given date in Asia/Kolkata
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(d);
+}
 function floorToBucket(d: Date, minutes: number): number {
   const ms = minutes * 60 * 1000;
   return Math.floor(d.getTime() / ms) * ms;
 }
 function gaussianWeight(k: number, spot: number, width = 300): number {
-  const d = k - spot;
-  return Math.exp(-(d * d) / (2 * width * width));
+  const diff = k - spot;
+  return Math.exp(-(diff * diff) / (2 * width * width));
 }
 function signalFromPrice(prevSpot: number, spot: number): Signal {
   return spot >= prevSpot ? "Bullish" : "Bearish";
@@ -176,13 +176,7 @@ async function computeRowsFromTicksWindow(params: {
     const spot = Number((curr.spot ?? curr.last_price ?? 0) as number);
     const prevSpot = Number((prev.spot ?? prev.last_price ?? 0) as number);
 
-    const volBps = volatilityValue(prevSpot, spot, "bps");
-    const volatility =
-      unitStore === "bps"
-        ? volBps
-        : unitStore === "pct"
-        ? volatilityValue(prevSpot, spot, "pct")
-        : volatilityValue(prevSpot, spot, "points");
+    const volatility = volatilityValue(prevSpot, spot, unitStore);
 
     let sig: Signal = signalFromPrice(prevSpot, spot);
     if (mode === "delta") sig = signalFromWeightedDelta(curr.strikes, spot);
@@ -216,8 +210,7 @@ async function dropLegacyOcRowsIndexes(db: Db) {
       if (hasBucketKey || legacyName) {
         try {
           await coll.dropIndex(name);
-          if (VERBOSE) 
-            console.log(`[oc_rows_cache] Dropped legacy index: ${name}`);
+          if (VERBOSE) console.log(`[oc_rows_cache] Dropped legacy index: ${name}`);
         } catch (e: any) {
           console.warn(`[oc_rows_cache] Failed dropping index ${name}:`, e?.message || e);
         }
@@ -238,21 +231,20 @@ export async function ensureOcRowsIndexes(db: Db) {
     await coll.createIndex(
       {
         underlying_security_id: 1,
-        underlying_segment: 1,
         expiry: 1,
         intervalMin: 1,
         mode: 1,
         unit: 1,
-        tsBucket: -1,
+        date: 1,
+        time: 1,
       },
       {
         name: "oc_rows_cache_core",
         unique: true,
-        partialFilterExpression: { tsBucket: { $type: "date" } },
+        partialFilterExpression: { date: { $type: "string" } },
       }
     );
   } catch (e: any) {
-    // ignore "existing index" shape mismatch noise
     if (String(e?.message || "").toLowerCase().includes("existing index")) {
       if (VERBOSE) console.warn("oc_rows_cache_core already exists (ok)");
     } else {
@@ -266,7 +258,9 @@ export async function ensureOcRowsIndexes(db: Db) {
         underlying_security_id: 1,
         expiry: 1,
         intervalMin: 1,
-        tsBucket: -1,
+        mode: 1,
+        unit: 1,
+        date: -1,
       },
       { name: "oc_rows_cache_query" }
     );
@@ -347,11 +341,6 @@ export async function materializeOcRowsOnce(args: {
         });
         rowsOut = rows;
         tickCount = tc;
-        if (VERBOSE) {
-          // console.log(
-          //   `[oc_rows_cache] try base window: expiry=${expiry} interval=${intervalMin}m since=${usedSince.toISOString()} ticks=${tickCount} rows=${rowsOut.length}`
-          // );
-        }
       }
 
       // Fallbacks
@@ -368,11 +357,6 @@ export async function materializeOcRowsOnce(args: {
             mode,
             unitStore: unit,
           });
-          if (VERBOSE) {
-            // console.log(
-            //   `[oc_rows_cache] fallback window: expiry=${expiry} interval=${intervalMin}m since=${trySince.toISOString()} ticks=${tc} rows=${rows.length}`
-            // );
-          }
           if (rows.length > 0) {
             rowsOut = rows;
             usedSince = trySince;
@@ -394,15 +378,17 @@ export async function materializeOcRowsOnce(args: {
 
       const bulk = db.collection<CacheDoc>(CACHE_COLL).initializeUnorderedBulkOp();
       for (const r of rowsOut) {
+        const dateStr = istDateISO(r.tsBucket); // YYYY-MM-DD in IST
+        // Upsert by date + time + mode + unit
         bulk
           .find({
             underlying_security_id: underlying,
-            underlying_segment: segment,
             expiry,
             intervalMin,
             mode,
             unit,
-            tsBucket: r.tsBucket,
+            date: dateStr,
+            time: r.time,
           } as any)
           .upsert()
           .update({
@@ -411,22 +397,16 @@ export async function materializeOcRowsOnce(args: {
               volatility: r.volatility,
               signal: r.signal,
               spot: r.spot,
-              updated_at: new Date(),
+              date: dateStr,
+              mode,
+              unit,
             },
-            $setOnInsert: {
-              created_at: new Date(),
-            },
+            $setOnInsert: {},
           });
       }
 
       const res = await bulk.execute();
       const upserts = (res.modifiedCount ?? 0) + (res.upsertedCount ?? 0);
-
-      if (VERBOSE) {
-        // console.log(
-          // `[oc_rows_cache] upserted=${upserts} (interval=${intervalMin}m, ticks=${tickCount}, since=${usedSince.toISOString()})`
-        // );
-      }
 
       results[intervalMin] = upserts;
     }
@@ -472,7 +452,6 @@ export function startOcRowsMaterializer(opts: {
           mode,
           unit,
         });
-        // console.log("⛏️ oc_rows_cache initial fill:", { underlying: u.id, res });
       } catch (e: any) {
         console.warn("oc_rows_cache initial fill error:", e?.message || e);
       }
@@ -492,7 +471,6 @@ export function startOcRowsMaterializer(opts: {
           mode,
           unit,
         });
-        // console.log("⛏️ oc_rows_cache sweep:", { underlying: u.id, res });
       } catch (e: any) {
         console.warn("oc_rows_cache sweep error:", e?.message || e);
       }

@@ -80,7 +80,6 @@ import gexCacheRouter from "./routes/gex_cache.routes";
 import { setGexCacheDb } from "./controllers/gex_cache.controller";
 
 /* ---------- OC rows cache bulk endpoints (if present) ---------- */
-/* NOTE: added startOcRowsMaterializer import so we can spawn the background materializer */
 import { ensureOcRowsIndexes, startOcRowsMaterializer } from "./services/oc_rows_cache";
 import registerOcRowsBulk from "./api/oc_rows_bulk.api";
 
@@ -223,10 +222,12 @@ async function startServer() {
 
     /* ============ START: oc_rows_cache materializer (background) ============ */
     try {
-      // Use configured MONGO_URI or fallback to localhost
-      const mongoUri = process.env.MONGO_URI || "mongodb://localhost:27017";
+      // Prefer an explicit FNO URI if supplied to avoid writing to wrong DB
+      const mongoUri = process.env.MONGO_FNO_URI || process.env.MONGO_URI || "mongodb://localhost:27017";
       const ocUnderlying = Number(process.env.OC_UNDERLYING_ID || 13);
       const ocSegment = process.env.OC_SEGMENT || "IDX_I";
+
+      console.log(`▶️ Starting oc_rows materializer using mongoUri=${mongoUri} db=${fnoDb.databaseName}`);
 
       ocRowsTimer = startOcRowsMaterializer({
         mongoUri,
@@ -289,7 +290,6 @@ async function shutdown(code = 0) {
     console.warn("mongo close failed:", (e as any)?.message || e);
   }
 
-  /* ===== new: clear ocRowsTimer if running ===== */
   try {
     if (ocRowsTimer) {
       clearInterval(ocRowsTimer);

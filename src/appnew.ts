@@ -224,7 +224,7 @@ async function startServer() {
     /* ============ START: oc_rows_cache materializer (background) ============ */
     try {
       // Use configured MONGO_URI or fallback to localhost
-      const mongoUri = process.env.MONGO_URI || "mongodb://localhost:27017";
+      const mongoUri = process.env.MONGO_URII || process.env.MONGO_URI || "mongodb://localhost:27017";
       const ocUnderlying = Number(process.env.OC_UNDERLYING_ID || 13);
       const ocSegment = process.env.OC_SEGMENT || "IDX_I";
 

@@ -172,7 +172,7 @@ async function startServer() {
     Heatmap(app, fnoDb);
 
     // FUTSTK OHLC / OC rows bulk are FNO data
-    registerOcRow(app); // if this is a thin wrapper that reads oc_rows_cache it may not need db param
+    registerOcRow(app, fnoDb); // if this is a thin wrapper that reads oc_rows_cache it may not need db param
     registerOcRowsBulk(app, fnoDb);
     registerFutstkOhlcRoutes(app, fnoDb);
 
